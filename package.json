@@ -1,0 +1,50 @@
+{
+  "name": "secretgate",
+  "version": "0.1.0",
+  "description": "Offline secret guardrail for AI coding agents. Redacts credentials before they reach the model, rehydrates them locally. No account, no cloud, no telemetry.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "secretgate": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "keywords": [
+    "secrets",
+    "security",
+    "ai",
+    "llm",
+    "claude-code",
+    "cursor",
+    "codex",
+    "redaction",
+    "guardrail",
+    "pre-commit"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "tsx src/cli/index.ts",
+    "corpus": "tsx scripts/gen-corpus.ts",
+    "pretest": "npm run corpus",
+    "test": "tsx --test test/*.test.ts",
+    "prebench": "npm run corpus",
+    "bench": "tsx test/bench.ts",
+    "typecheck": "tsc --noEmit",
+    "check:no-network": "node scripts/check-no-network.mjs",
+    "sync-rules": "tsx scripts/sync-rules.ts",
+    "ci": "npm run typecheck && npm run check:no-network && npm run test && npm run bench && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

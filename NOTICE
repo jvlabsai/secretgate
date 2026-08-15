@@ -1,0 +1,46 @@
+secretgate
+Copyright 2026 JV Labs
+
+This product includes software developed at JV Labs (https://jvlabs.io).
+
+--------------------------------------------------------------------------------
+Third-party attributions
+--------------------------------------------------------------------------------
+
+Gitleaks (https://github.com/gitleaks/gitleaks)
+Copyright (c) 2019 Zachary Rice
+Licensed under the MIT License.
+
+Portions of secretgate's detection ruleset are derived from the Gitleaks
+rule definitions (`gitleaks.toml`). Rules are converted at build time by
+`scripts/sync-rules.ts` into `src/core/rules/generated.ts`; secretgate has no
+runtime dependency on Gitleaks and does not bundle or invoke the Gitleaks
+binary. The regular expressions and the provider taxonomy they encode remain
+the work of the Gitleaks maintainers and community, and we are grateful for it.
+
+MIT License text for Gitleaks:
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+--------------------------------------------------------------------------------
+
+The baseline file format is conceptually similar to the one used by
+Yelp's detect-secrets (https://github.com/Yelp/detect-secrets, Apache-2.0).
+No code was copied; the idea of hashing accepted findings so brownfield repos
+stay adoptable is theirs and worth crediting.
