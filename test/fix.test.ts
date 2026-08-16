@@ -84,11 +84,19 @@ test("the python import lands after a shebang and docstring", () => {
   assert.ok(lines.indexOf("import os") > 1, "import must come after the docstring");
 });
 
-test("go gets os added to an existing import block", () => {
+test("go gets os added to an existing import block, in gofmt order", () => {
+  // gofmt sorts imports; inserting out of order means it rewrites our line the
+  // first time anyone saves the file.
   const source = `package main\n\nimport (\n\t"fmt"\n)\n\nfunc main() {\n\tk := "${FAKE.awsKey}"\n\tfmt.Println(k)\n}\n`;
   const plan = planFix("/a/main.go", source, config);
-  assert.match(plan.updated, /import \(\n\t"os"\n\t"fmt"\n\)/);
+  assert.match(plan.updated, /import \(\n\t"fmt"\n\t"os"\n\)/, '"fmt" sorts before "os"');
   assert.equal(plan.updated.match(/"os"/g)?.length, 1);
+});
+
+test("go import insertion stays sorted against a later package", () => {
+  const source = `package main\n\nimport (\n\t"strings"\n)\n\nfunc main() {\n\tk := "${FAKE.awsKey}"\n\t_ = strings.TrimSpace(k)\n}\n`;
+  const plan = planFix("/a/main.go", source, config);
+  assert.match(plan.updated, /import \(\n\t"os"\n\t"strings"\n\)/, '"os" sorts before "strings"');
 });
 
 test("go with no imports at all gets one", () => {
@@ -98,12 +106,34 @@ test("go with no imports at all gets one", () => {
   assert.match(plan.updated, /package main/);
 });
 
-test("go with a single import is promoted to a block", () => {
+test("go with a single import is promoted to a sorted block", () => {
   const source = `package main\n\nimport "fmt"\n\nfunc main() {\n\tk := "${FAKE.awsKey}"\n\tfmt.Println(k)\n}\n`;
   const plan = planFix("/a/main.go", source, config);
-  assert.match(plan.updated, /import \(/);
-  assert.match(plan.updated, /"os"/);
-  assert.match(plan.updated, /"fmt"/, "the existing import must survive");
+  assert.match(plan.updated, /import \(\n\t"fmt"\n\t"os"\n\)/, "existing import must survive, in order");
+});
+
+/**
+ * These three had one assertion each, which is how the Python and Go import
+ * bugs got through. Each now checks the exact output a developer would get.
+ */
+test("ruby uses ENV and needs no require", () => {
+  const plan = planFix("/a/app.rb", `API_KEY = "${FAKE.awsKey}"\n`, config);
+  assert.equal(plan.updated, 'API_KEY = ENV["API_KEY"]\n');
+});
+
+test("php uses getenv and needs no import", () => {
+  const plan = planFix("/a/app.php", `<?php\n$apiKey = "${FAKE.awsKey}";\n`, config);
+  assert.equal(plan.updated, '<?php\n$apiKey = getenv("API_KEY");\n');
+});
+
+test("shell reads the variable from the environment", () => {
+  const plan = planFix("/a/app.sh", `#!/bin/bash\nAPI_KEY="${FAKE.awsKey}"\n`, config);
+  assert.equal(plan.updated, '#!/bin/bash\nAPI_KEY="$API_KEY"\n');
+});
+
+test("typescript is unchanged apart from the lookup", () => {
+  const plan = planFix("/a/app.ts", `const apiKey = "${FAKE.awsKey}";\n`, config);
+  assert.equal(plan.updated, "const apiKey = process.env.API_KEY;\n");
 });
 
 test("languages with global env access need no import", () => {

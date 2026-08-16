@@ -217,6 +217,91 @@ test("the proxy reports a server it cannot start rather than hanging", () => {
   }
 });
 
+/**
+ * Real MCP traffic is not just tools/call. The proxy had only ever met a toy
+ * echo server, so these cover the shapes it will actually see: the initialize
+ * handshake, notifications with no id, and a tools/list response carrying
+ * content blocks.
+ */
+test("the proxy passes protocol traffic through without corrupting it", () => {
+  const echo = `
+    const rl = require("node:readline").createInterface({ input: process.stdin });
+    rl.on("line", (line) => {
+      const msg = JSON.parse(line);
+      if (msg.id === undefined) { process.stdout.write(line + "\\n"); return; }
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { echoed: msg.params ?? null } }) + "\\n");
+    });
+  `;
+
+  const home = tempDir();
+  try {
+    const messages = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {} } },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "read", arguments: { path: "/app/README.md" } } },
+    ];
+
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", CLI, "mcp-proxy", "--", process.execPath, "-e", echo],
+      {
+        input: `${messages.map((m) => JSON.stringify(m)).join("\n")}\n`,
+        encoding: "utf8",
+        env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+        timeout: 60_000,
+      },
+    );
+
+    const lines = (result.stdout ?? "").trim().split("\n").filter(Boolean);
+    assert.equal(lines.length, 4, `expected every message relayed, got:\n${result.stdout}`);
+
+    // Clean traffic must survive byte-for-byte in meaning, ids included.
+    const parsed = lines.map((l) => JSON.parse(l));
+    assert.equal(parsed[0].id, 1);
+    assert.equal(parsed[1].method, "notifications/initialized", "a notification with no id must pass through");
+    assert.equal(parsed[3].result.echoed.arguments.path, "/app/README.md");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the proxy redacts a secret a server returns in a content block", () => {
+  // The direction that matters most: a filesystem server reading .env for the
+  // model. This response is headed straight for the context window.
+  const leaky = `
+    const rl = require("node:readline").createInterface({ input: process.stdin });
+    const secret = ["AKIA", "4KTNQ7VZL2WXMP3D"].join("");
+    rl.on("line", (line) => {
+      const msg = JSON.parse(line);
+      process.stdout.write(JSON.stringify({
+        jsonrpc: "2.0", id: msg.id,
+        result: { content: [{ type: "text", text: "AWS_ACCESS_KEY_ID=" + secret }] },
+      }) + "\\n");
+    });
+  `;
+
+  const home = tempDir();
+  try {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", CLI, "mcp-proxy", "--", process.execPath, "-e", leaky],
+      {
+        input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "read_file" } })}\n`,
+        encoding: "utf8",
+        env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+        timeout: 60_000,
+      },
+    );
+
+    const stdout = result.stdout ?? "";
+    assert.ok(!stdout.includes(FAKE.awsKey), `a server response leaked a credential to the model:\n${stdout}`);
+    assert.match(stdout, /SECRETGATE_AWS_KEY_/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("the proxy relays a real JSON-RPC exchange and redacts on the way through", () => {
   // A minimal MCP-ish server: echoes back whatever params it is sent, which is
   // the shape that matters — a server returning file contents to the model.

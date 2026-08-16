@@ -79,17 +79,37 @@ export function ensureImport(language: Language, source: string): string {
   if (language === "go") {
     if (/^\s*import\s+"os"\s*$/m.test(source) || /^\s*"os"\s*$/m.test(source)) return source;
 
-    // Grouped block: import ( ... )
+    // Grouped block: import ( ... ). Insert in sorted position, because gofmt
+    // orders imports alphabetically and would otherwise rewrite our line the
+    // first time anyone saves the file.
     const grouped = source.match(/^import\s*\(\s*$/m);
     if (grouped && grouped.index !== undefined) {
-      const insertAt = grouped.index + grouped[0].length;
-      return `${source.slice(0, insertAt)}\n\t"os"${source.slice(insertAt)}`;
+      const blockStart = grouped.index + grouped[0].length;
+      const blockEnd = source.indexOf(")", blockStart);
+      if (blockEnd !== -1) {
+        const body = source.slice(blockStart, blockEnd);
+        const lines = body.split("\n");
+        // First existing import that sorts after "os".
+        const at = lines.findIndex((l) => {
+          const m = l.match(/^\s*(?:[\w.]+\s+)?"([^"]+)"/);
+          return m?.[1] !== undefined && m[1] > "os";
+        });
+        if (at === -1) {
+          const trimmed = body.replace(/\s*$/, "");
+          return source.slice(0, blockStart) + `${trimmed}\n\t"os"\n` + source.slice(blockEnd);
+        }
+        lines.splice(at, 0, '\t"os"');
+        return source.slice(0, blockStart) + lines.join("\n") + source.slice(blockEnd);
+      }
     }
 
-    // Single import: promote it to a block so both survive.
-    const single = source.match(/^import\s+("(?:[^"]+)")\s*$/m);
+    // Single import: promote it to a block so both survive, still sorted.
+    const single = source.match(/^import\s+"([^"]+)"\s*$/m);
     if (single && single.index !== undefined) {
-      return source.slice(0, single.index) + `import (\n\t"os"\n\t${single[1]}\n)` + source.slice(single.index + single[0].length);
+      const other = single[1]!;
+      const ordered = other < "os" ? [other, "os"] : ["os", other];
+      const block = `import (\n${ordered.map((p) => `\t"${p}"`).join("\n")}\n)`;
+      return source.slice(0, single.index) + block + source.slice(single.index + single[0].length);
     }
 
     // No imports at all: place one after the package clause.
