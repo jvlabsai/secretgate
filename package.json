@@ -1,6 +1,6 @@
 {
   "name": "secretgate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Offline secret guardrail for AI coding agents. Redacts credentials before they reach the model, rehydrates them locally. No account, no cloud, no telemetry.",
   "license": "Apache-2.0",
   "type": "module",
