@@ -33,7 +33,7 @@
     "dev": "tsx src/cli/index.ts",
     "corpus": "tsx scripts/gen-corpus.ts",
     "pretest": "npm run corpus",
-    "test": "tsx --test test/scan.test.ts test/vault.test.ts test/hooks.test.ts test/config.test.ts test/persistence.test.ts test/custom-rules.test.ts test/fix.test.ts test/heartbeat-mcp.test.ts",
+    "test": "tsx --test test/scan.test.ts test/vault.test.ts test/hooks.test.ts test/config.test.ts test/persistence.test.ts test/custom-rules.test.ts test/fix.test.ts test/heartbeat-mcp.test.ts test/secret-store.test.ts",
     "prebench": "npm run corpus",
     "bench": "tsx test/bench.ts",
     "typecheck": "tsc --noEmit",

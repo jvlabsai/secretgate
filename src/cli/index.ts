@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve, dirname } from "node:path";
+import { join, relative, resolve, dirname, basename } from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadConfig, defaultConfig, SAMPLE_CONFIG, CONFIG_FILENAMES, BASELINE_FILENAME, findUp } from "../config/index.js";
 import { scan, blocking } from "../core/scan.js";
@@ -16,6 +16,7 @@ import { planFix, applyEnvFiles, writeSource, createRegistry, findProjectRoot } 
 import { detectAgents, installClaudeCode, installCursor, installGitHook, uninstallAll, installedRecords, STATE_DIR } from "./install.js";
 import { clearStore, storeStatus, VAULT_PATH } from "../core/vault-store.js";
 import { readHeartbeat, agentHealth, humanAge, clearHeartbeat } from "../core/heartbeat.js";
+import { isSecretStore, assessStore, type StoreVerdict } from "./secret-store.js";
 
 // No colour library. Five SGR codes are the whole requirement, and they go
 // quiet when stdout is not a terminal or NO_COLOR is set.
@@ -105,6 +106,7 @@ function cmdScan(target: string, opts: { json?: boolean; mode?: string }): numbe
 
   const files = statSync(root).isDirectory() ? [...walk(root)] : [root];
   const rows: { file: string; line: number; ruleId: string; provider: string; confidence: string }[] = [];
+  const stores: StoreVerdict[] = [];
   let scanned = 0;
 
   for (const file of files) {
@@ -119,7 +121,16 @@ function cmdScan(target: string, opts: { json?: boolean; mode?: string }): numbe
     scanned++;
 
     const { findings } = scan(content, { ...config, path: file });
-    for (const f of blocking(findings, config)) {
+    const hits = blocking(findings, config);
+
+    // A .env holding credentials is the file doing its job. The only question
+    // worth asking about it is whether git is about to publish it.
+    if (isSecretStore(file)) {
+      if (hits.length > 0) stores.push(assessStore(file, hits.length));
+      continue;
+    }
+
+    for (const f of hits) {
       rows.push({
         file: relative(process.cwd(), file) || file,
         line: content.slice(0, f.start).split("\n").length,
@@ -130,12 +141,14 @@ function cmdScan(target: string, opts: { json?: boolean; mode?: string }): numbe
     }
   }
 
+  const exposed = stores.filter((s) => s.exposed);
+
   if (opts.json) {
-    out(JSON.stringify({ scanned, findings: rows }, null, 2));
-    return rows.length > 0 ? 1 : 0;
+    out(JSON.stringify({ scanned, findings: rows, secretStores: stores }, null, 2));
+    return rows.length > 0 || exposed.length > 0 ? 1 : 0;
   }
 
-  if (rows.length === 0) {
+  if (rows.length === 0 && stores.length === 0) {
     out(`${c.green("clean")}  ${scanned} file(s) scanned, nothing found`);
     return 0;
   }
@@ -144,11 +157,43 @@ function cmdScan(target: string, opts: { json?: boolean; mode?: string }): numbe
   for (const r of rows) {
     out(`  ${c.red("!")} ${c.bold(`${r.file}:${r.line}`)}  ${r.ruleId} ${c.dim(`(${r.provider})`)}`);
   }
+
+  if (rows.length > 0) {
+    out("");
+    out(`${c.red(`${rows.length} credential(s)`)} hardcoded in ${scanned} scanned file(s)`);
+    out(c.dim(`  secretgate fix .            move them into .env`));
+    out(c.dim(`  # secretgate:allow          if a line is a false positive`));
+    out(c.dim(`  secretgate baseline         accept everything currently flagged`));
+  }
+
+  if (stores.length > 0) {
+    out("");
+    out(c.bold("  secrets files"));
+    for (const s of stores) {
+      const name = relative(process.cwd(), s.path) || s.path;
+      if (s.status === "ignored") {
+        out(`    ${c.green("ok")}      ${name.padEnd(24)} ${c.dim(`${s.credentials} credential(s), ignored by git`)}`);
+      } else if (s.status === "no-repo") {
+        out(`    ${c.dim("—")}       ${name.padEnd(24)} ${c.dim(`${s.credentials} credential(s), not a git repo`)}`);
+      } else {
+        out(`    ${c.red("EXPOSED")} ${c.bold(name.padEnd(24))} ${c.red(`${s.credentials} credential(s) and NOT ignored by git`)}`);
+      }
+    }
+    if (exposed.length > 0) {
+      out("");
+      out(c.red(`  ${exposed.length} secrets file(s) would be committed.`));
+      for (const s of exposed) {
+        out(c.dim(`    echo '${basename(s.path)}' >> .gitignore`));
+      }
+      out(c.dim(`    If it is already committed, the credentials must be rotated — removing`));
+      out(c.dim(`    the file does not remove it from git history.`));
+    } else {
+      out(c.dim("    Credentials belong here. Nothing to do."));
+    }
+  }
+
   out("");
-  out(`${c.red(`${rows.length} credential(s)`)} across ${scanned} file(s)`);
-  out(c.dim(`  fix, add "# secretgate:allow", or run "secretgate baseline" to accept`));
-  out("");
-  return 1;
+  return rows.length > 0 || exposed.length > 0 ? 1 : 0;
 }
 
 // --- fix -------------------------------------------------------------------
