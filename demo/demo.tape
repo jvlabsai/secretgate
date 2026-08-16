@@ -22,7 +22,7 @@ Output "docs/demo.gif"
 Set Shell bash
 Set FontSize 14
 Set Width 1280
-Set Height 500
+Set Height 420
 Set Padding 18
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 35ms
@@ -53,7 +53,7 @@ Type "# The agent edits the file and hands it back:"
 Enter
 Sleep 800ms
 
-Type "secretgate filter < .env > redacted.env"
+Type "secretgate filter --quiet < .env > redacted.env"
 Enter
 Sleep 500ms
 
