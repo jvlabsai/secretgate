@@ -16,17 +16,12 @@ a stable placeholder, lets the agent do its work, and puts the real value back
 locally before anything touches disk. The model never sees the secret. You never
 lose your train of thought.
 
-```
-you type                                                the agent sees
-─────────────────────────────────────────  ───────────────────────────────────────────
-DATABASE_URL=postgres://svc:hunter2@db/app  DATABASE_URL=postgres://svc:SECRETGATE_DATABASE_PASSWORD_4837@db/app
-AWS_ACCESS_KEY_ID=AKIA4KTNQ7VZL2W…          AWS_ACCESS_KEY_ID=SECRETGATE_AWS_KEY_6B8A
-GITHUB_TOKEN=ghp_9fK2mQ7xLp4RtY8v…          GITHUB_TOKEN=SECRETGATE_GITHUB_TOKEN_E36B
-```
+![secretgate redacting a .env, the agent editing it, and the real values being restored](docs/demo.gif)
 
-The agent can still reason about the code — it knows that's an AWS key and a
-Postgres password. It just cannot read them. When it writes a file back, the
-real values return.
+Note what survived that round trip: the agent's edit (`db.internal` became
+`db.prod.internal`) is kept, and all three credentials come back. The agent
+could still reason about the file — it knew that was an AWS key and a Postgres
+password — it just could not read either one.
 
 ```bash
 npx secretgate init
