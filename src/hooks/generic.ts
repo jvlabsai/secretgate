@@ -14,7 +14,7 @@ export async function runFilter(opts: { rehydrate?: boolean; quiet?: boolean } =
   const config = loadConfig();
 
   if (opts.rehydrate) {
-    const { text: restored, warnings } = guardInbound(text);
+    const { text: restored, warnings } = guardInbound(text, config);
     process.stdout.write(restored);
     if (!opts.quiet) for (const w of warnings) process.stderr.write(`${w}\n`);
     return warnings.length > 0 ? 1 : 0;

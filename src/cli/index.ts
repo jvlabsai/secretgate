@@ -11,6 +11,7 @@ import { runClaudeCodeHook } from "../hooks/claude-code.js";
 import { runFilter } from "../hooks/generic.js";
 import { runPreCommit } from "../hooks/git.js";
 import { detectAgents, installClaudeCode, installGitHook, uninstallAll, installedRecords, STATE_DIR } from "./install.js";
+import { clearStore, storeStatus, VAULT_PATH } from "../core/vault-store.js";
 
 // No colour library. Five SGR codes are the whole requirement, and they go
 // quiet when stdout is not a terminal or NO_COLOR is set.
@@ -40,6 +41,7 @@ const USAGE = `${c.bold("secretgate")} — keep credentials out of your AI codin
   secretgate doctor            check what is wired up and what is not
   secretgate uninstall         restore every config file we touched
   secretgate rules             list detection rules
+  secretgate vault             show the local placeholder store (--clear to wipe)
 
   secretgate hook claude-code  hook entry point (not for humans)
   secretgate hook pre-commit   git hook entry point
@@ -294,13 +296,36 @@ function cmdDoctor(): number {
 
 function cmdUninstall(): number {
   const { restored, removed, problems } = uninstallAll();
+  // Removing the tool must not leave its cache of real credentials behind.
+  const vaultCleared = clearStore();
   out("");
+  if (vaultCleared) out(`  ${c.green("cleared")}  ${VAULT_PATH}`);
   for (const f of restored) out(`  ${c.green("restored")} ${f}`);
   for (const f of removed) out(`  ${c.green("removed")}  ${f}`);
   for (const p of problems) out(`  ${c.yellow("note")}     ${p}`);
   if (restored.length + removed.length + problems.length === 0) out(c.dim("  nothing to undo"));
   out("");
   out(c.dim("  secretgate.yml and .secretgate-baseline.json were left alone; delete them if you want."));
+  out("");
+  return 0;
+}
+
+function cmdVault(clear: boolean): number {
+  if (clear) {
+    const removed = clearStore();
+    out(removed ? `${c.green("cleared")} ${VAULT_PATH}` : c.dim("nothing to clear"));
+    return 0;
+  }
+
+  const status = storeStatus();
+  out("");
+  out(`  ${"path".padEnd(12)} ${status.path}`);
+  out(`  ${"exists".padEnd(12)} ${status.exists ? "yes" : "no"}`);
+  out(`  ${"entries".padEnd(12)} ${status.entries}`);
+  out("");
+  out(c.dim("  Holds the placeholder -> value mapping so redacted text can be"));
+  out(c.dim("  restored after the agent hands it back. Entries expire after 12h."));
+  out(c.dim("  File mode 0600. Wipe it now with: secretgate vault --clear"));
   out("");
   return 0;
 }
@@ -340,6 +365,7 @@ async function main(): Promise<number> {
       quiet: { type: "boolean", short: "q" },
       mode: { type: "string" },
       rehydrate: { type: "boolean" },
+      clear: { type: "boolean" },
     },
   });
 
@@ -371,6 +397,8 @@ async function main(): Promise<number> {
       return cmdUninstall();
     case "rules":
       return cmdRules(!!values.json);
+    case "vault":
+      return cmdVault(!!values.clear);
     case "hook": {
       if (arg === "claude-code") return runClaudeCodeHook();
       if (arg === "pre-commit") return runPreCommit();

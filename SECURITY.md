@@ -50,15 +50,46 @@ design, and no amount of rule-writing changes that:
 
 ### Where secrets live at runtime
 
-- In memory, in a single per-process `Vault`, for the lifetime of the process.
-- Wiped on `exit`, `SIGINT` and `SIGTERM`.
+**Redact mode writes secrets to disk. Read this section before using it.**
+
+Every hook invocation is its own process — Claude Code runs the binary once for
+`UserPromptSubmit` and again for `PostToolUse`. An in-memory-only vault has
+already exited by the time the agent's edit comes back, so redaction could
+remove a secret and never restore it. Making the feature work at all requires
+the mapping to outlive the process that created it.
+
+So, concretely:
+
+- The placeholder → value mapping is written to `~/.secretgate/vault.json`
+  with file mode `0600`.
+- Entries expire after 12 hours and are dropped on the next load.
+- `secretgate vault` shows what is stored; `secretgate vault --clear` removes
+  it; `secretgate uninstall` clears it too.
+- In memory it lives in a single per-process `Vault`, wiped on `exit`, `SIGINT`
+  and `SIGTERM`.
 - The vault refuses to serialise itself through `JSON.stringify`, `toString`,
   template interpolation or `util.inspect`, so a stray `console.log` or an error
-  message cannot spill it. There is a test asserting exactly this against every
+  message cannot spill it. There is a test asserting this against every
   rendering path we could think of.
-- **Nothing is written to disk by default.** `vault.persist` exists in the
-  config schema and is honoured as `false`; encrypted persistence is not
-  implemented. If you set it to `true` today, nothing happens.
+
+**The file is not encrypted, and that is deliberate rather than an oversight.**
+Any key we could ship would have to sit beside the ciphertext, on the same disk,
+under the same permissions — which buys close to nothing while inviting a
+security claim we could not defend. An OS-keychain-backed key would be
+genuinely better and needs a native dependency; it is on the list, not
+pretended.
+
+The narrow argument for why this is acceptable: anything able to read
+`~/.secretgate/vault.json` already has your user privileges, and could equally
+read `~/.aws/credentials`, your `.env`, or your shell history. The store is
+short-lived and holds only what you already pasted. It does not meaningfully
+widen the attack surface.
+
+It is still a real trade. **If you would rather no secret ever touched disk,
+set `mode: block`** — you lose the redact-and-restore workflow and get a hard
+stop instead. Setting `vault.persist: false` also stops the writes, but then
+redaction cannot restore anything and you get placeholders you cannot undo,
+which is the worst of both. Use `block`.
 
 ### The baseline file
 

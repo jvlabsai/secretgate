@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { inspect } from "node:util";
 import type { Finding } from "./types.js";
+import { loadStore, saveStore, emptyStore, type StoredVault } from "./vault-store.js";
 
 /**
  * Placeholder shape: SECRETGATE_<PROVIDER>_<KIND>_<suffix>
@@ -68,16 +69,48 @@ export interface RehydrateResult {
 
 export class Vault {
   /**
-   * Per-process, per-run. Not derived from anything on disk, so two runs never
-   * produce the same placeholder for the same secret unless they share a Vault.
+   * Keyed material for placeholder suffixes. When the vault is backed by a
+   * store this comes from disk, so the same secret keeps the same placeholder
+   * across the separate processes each hook invocation runs in.
    */
-  readonly #sessionKey: Buffer = randomBytes(32);
+  #sessionKey: Buffer = randomBytes(32);
   readonly #bySecret = new Map<string, string>();
   readonly #byPlaceholder = new Map<string, string>();
   #wiped = false;
+  /** Set when this vault reads and writes an on-disk store. */
+  #storePath: string | undefined;
 
   get size(): number {
     return this.#byPlaceholder.size;
+  }
+
+  /**
+   * Back this vault with a file, loading whatever is already there.
+   *
+   * Without this, redact mode is broken in exactly the setup it exists for:
+   * the agent hooks run one process per event, so the vault that redacts a
+   * prompt has already exited by the time an edit comes back to be restored.
+   */
+  attachStore(path: string): void {
+    this.#storePath = path;
+    const store = loadStore(path);
+    if (!store) return;
+
+    this.#sessionKey = Buffer.from(store.key, "hex");
+    for (const [placeholder, entry] of Object.entries(store.entries)) {
+      this.#byPlaceholder.set(placeholder, entry.secret);
+      this.#bySecret.set(entry.secret, placeholder);
+    }
+  }
+
+  #persist(): void {
+    if (!this.#storePath || this.#wiped) return;
+    const store: StoredVault = emptyStore(this.#sessionKey.toString("hex"));
+    const at = Date.now();
+    for (const [placeholder, secret] of this.#byPlaceholder) {
+      store.entries[placeholder] = { secret, at };
+    }
+    saveStore(store, this.#storePath);
   }
 
   /**
@@ -125,6 +158,7 @@ export class Vault {
     }
 
     replacements.reverse();
+    if (replacements.length > 0) this.#persist();
     return { text: out, replacements };
   }
 
@@ -208,14 +242,15 @@ export class Vault {
 }
 
 /**
- * One vault per process. Wiped on the way out so a crash or a Ctrl-C does not
- * leave decrypted values sitting in a core dump.
+ * One vault per process, optionally backed by a store so it survives the gap
+ * between one hook invocation and the next.
  */
 let processVault: Vault | undefined;
 
-export function getVault(): Vault {
+export function getVault(storePath?: string): Vault {
   if (!processVault) {
     processVault = new Vault();
+    if (storePath) processVault.attachStore(storePath);
     const wipe = () => processVault?.wipe();
     process.once("exit", wipe);
     process.once("SIGINT", () => {

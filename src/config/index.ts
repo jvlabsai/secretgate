@@ -12,7 +12,10 @@ export function defaultConfig(): Config {
     entropy: { enabled: true, threshold: 4.0, action: "warn" },
     rules: { disable: [] },
     allowlist: { paths: [], patterns: [] },
-    vault: { persist: false },
+    // On by default because redact mode does not function without it: hooks run
+    // one process per event, so a purely in-memory vault has already exited by
+    // the time an agent's edit comes back to be restored.
+    vault: { persist: true },
   };
 }
 
@@ -106,7 +109,11 @@ allowlist:
     - "EXAMPLE_.*"
 
 vault:
-  # Off by default: keeping secrets only in memory means a crash cannot leave
-  # them on disk. Turn on for cross-session placeholder stability.
-  persist: false
+  # Required for redact mode to work. Agent hooks run one process per event, so
+  # the mapping has to outlive the process that made it or a secret can be
+  # swapped out and never restored. Entries live in ~/.secretgate/vault.json
+  # (0600), expire after 12 hours, and clear with \`secretgate vault --clear\`.
+  # Set false only if you would rather no secret ever touched disk — in which
+  # case use \`mode: block\`, since redaction will no longer round-trip.
+  persist: true
 `;

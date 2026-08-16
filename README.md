@@ -1,5 +1,11 @@
 # secretgate
 
+[![ci](https://github.com/jvlabsai/secretgate/actions/workflows/ci.yml/badge.svg)](https://github.com/jvlabsai/secretgate/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/secretgate)](https://www.npmjs.com/package/secretgate)
+[![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+[![dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)](package.json)
+[![precision](https://img.shields.io/badge/corpus%20precision-100%25-brightgreen)](#current-corpus-results)
+
 **Keep credentials out of your AI coding agent — without breaking your flow.**
 
 You paste a stack trace into Claude Code. It has your database URL in it. That
@@ -177,9 +183,19 @@ agent truncated or reformatted a placeholder, or invented one, secretgate warns
 rather than substituting — writing a real credential into a location nobody
 chose is worse than an edit that fails.
 
-The vault lives in memory, is wiped on exit, and refuses to render its contents
-through `JSON.stringify`, `console.log`, `util.inspect` or a stack trace. There
-is a test that greps every rendering path for a known secret.
+The vault refuses to render its contents through `JSON.stringify`,
+`console.log`, `util.inspect` or a stack trace, and there is a test that greps
+every rendering path for a known secret.
+
+**Redact mode stores the mapping on disk**, at `~/.secretgate/vault.json`, mode
+`0600`, entries expiring after 12 hours. It has to: agent hooks run one process
+per event, so a purely in-memory vault has exited before the agent's edit comes
+back to be restored. Inspect it with `secretgate vault`, wipe it with
+`secretgate vault --clear`.
+
+That is a real trade and [SECURITY.md](SECURITY.md) argues it honestly rather
+than glossing it. If you would rather no secret ever touched disk, use
+`mode: block`.
 
 ## What is not built yet
 
@@ -190,8 +206,10 @@ Being straight about it rather than letting you find out:
   APIs move quickly and shipping an adapter I cannot test against the current
   version would be worse than shipping none.
 - **MCP proxy mode** — designed, not written. A real leak path, and next up.
-- **Encrypted vault persistence** — the config flag exists and is honoured as
-  "off". Cross-session placeholder stability is not implemented.
+- **Encryption at rest for the vault** — the store is `0600` and short-lived but
+  not encrypted, because a key stored beside the ciphertext is theatre. Doing it
+  properly means an OS-keychain dependency, which conflicts with the zero-runtime-
+  dependency guarantee. Open question, honestly flagged.
 - **The gitleaks rule import** — `scripts/sync-rules.ts` works and emits a
   committed `generated.ts`, but the shipped ruleset is the 55 hand-written rules.
 

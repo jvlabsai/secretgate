@@ -156,7 +156,7 @@ export async function runClaudeCodeHook(): Promise<number> {
     const text = stringifyResponse(payload.tool_response);
     if (!text) return allow(), 0;
 
-    const { warnings, substituted } = guardInbound(text);
+    const { warnings, substituted } = guardInbound(text, config);
     if (warnings.length > 0) {
       emit({
         hookSpecificOutput: {

@@ -1,6 +1,16 @@
 import { scan, blocking } from "../core/scan.js";
 import { getVault } from "../core/redact.js";
+import { VAULT_PATH } from "../core/vault-store.js";
 import type { Config, Finding } from "../core/types.js";
+
+/**
+ * Redaction only works if the mapping outlives the process that made it —
+ * hooks run one process per event — so the store is used whenever redact mode
+ * is in play. `vault.persist: false` turns it off, at the cost of rehydration.
+ */
+function vaultFor(config: Pick<Config, "vault">) {
+  return getVault(config.vault.persist ? VAULT_PATH : undefined);
+}
 
 export interface GuardOutcome {
   action: "allow" | "modify" | "deny";
@@ -46,7 +56,7 @@ export function guardOutbound(text: string, config: Config): GuardOutcome {
     };
   }
 
-  const vault = getVault();
+  const vault = vaultFor(config);
   const { text: redacted, replacements } = vault.redact(text, serious);
   return {
     action: "modify",
@@ -62,8 +72,11 @@ export function guardOutbound(text: string, config: Config): GuardOutcome {
  * Inbound: swap placeholders back before bytes reach disk. Warnings are the
  * important half — a placeholder the agent mangled means the edit is suspect.
  */
-export function guardInbound(text: string): { text: string; warnings: string[]; substituted: number } {
-  const vault = getVault();
+export function guardInbound(
+  text: string,
+  config: Pick<Config, "vault"> = { vault: { persist: true } },
+): { text: string; warnings: string[]; substituted: number } {
+  const vault = vaultFor(config);
   if (!vault.hasPlaceholders(text)) return { text, warnings: [], substituted: 0 };
 
   const { text: restored, substituted, warnings } = vault.rehydrate(text);
