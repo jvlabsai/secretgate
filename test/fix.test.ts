@@ -46,6 +46,76 @@ test("each language gets its own idiom", () => {
   }
 });
 
+/**
+ * Emitting a reference to something not in scope is the same class of mistake
+ * as putting a lookup inside a string literal: the diff reads correctly and the
+ * program is broken. Python raised NameError at runtime; Go would not compile.
+ */
+test("python gets its os import added", () => {
+  const plan = planFix("/a/app.py", `API_KEY = "${FAKE.awsKey}"\n`, config);
+  assert.match(plan.updated, /^import os$/m);
+  assert.match(plan.updated, /os\.environ\["API_KEY"\]/);
+});
+
+test("python does not get a second os import", () => {
+  const source = `import os\nimport sys\n\nAPI_KEY = "${FAKE.awsKey}"\n`;
+  const plan = planFix("/a/app.py", source, config);
+  assert.equal(plan.updated.match(/^import os$/gm)?.length, 1);
+});
+
+test("`from os import environ` does NOT count as importing os", () => {
+  // It binds `environ`, not `os`, so os.environ would still be undefined.
+  const source = `from os import environ\n\nAPI_KEY = "${FAKE.awsKey}"\n`;
+  const plan = planFix("/a/app.py", source, config);
+  assert.match(plan.updated, /^import os$/m, "os.environ needs os itself to be bound");
+});
+
+test("`import os.path` already binds os", () => {
+  const source = `import os.path\n\nAPI_KEY = "${FAKE.awsKey}"\n`;
+  const plan = planFix("/a/app.py", source, config);
+  assert.equal(plan.updated.match(/^import os$/gm), null, "os is already bound; do not add a duplicate");
+});
+
+test("the python import lands after a shebang and docstring", () => {
+  const source = `#!/usr/bin/env python\n"""Module docstring."""\n\nAPI_KEY = "${FAKE.awsKey}"\n`;
+  const plan = planFix("/a/app.py", source, config);
+  const lines = plan.updated.split("\n");
+  assert.equal(lines[0], "#!/usr/bin/env python", "shebang must stay on line one");
+  assert.ok(lines.indexOf("import os") > 1, "import must come after the docstring");
+});
+
+test("go gets os added to an existing import block", () => {
+  const source = `package main\n\nimport (\n\t"fmt"\n)\n\nfunc main() {\n\tk := "${FAKE.awsKey}"\n\tfmt.Println(k)\n}\n`;
+  const plan = planFix("/a/main.go", source, config);
+  assert.match(plan.updated, /import \(\n\t"os"\n\t"fmt"\n\)/);
+  assert.equal(plan.updated.match(/"os"/g)?.length, 1);
+});
+
+test("go with no imports at all gets one", () => {
+  const source = `package main\n\nfunc main() {\n\tk := "${FAKE.awsKey}"\n\t_ = k\n}\n`;
+  const plan = planFix("/a/main.go", source, config);
+  assert.match(plan.updated, /^import "os"$/m);
+  assert.match(plan.updated, /package main/);
+});
+
+test("go with a single import is promoted to a block", () => {
+  const source = `package main\n\nimport "fmt"\n\nfunc main() {\n\tk := "${FAKE.awsKey}"\n\tfmt.Println(k)\n}\n`;
+  const plan = planFix("/a/main.go", source, config);
+  assert.match(plan.updated, /import \(/);
+  assert.match(plan.updated, /"os"/);
+  assert.match(plan.updated, /"fmt"/, "the existing import must survive");
+});
+
+test("languages with global env access need no import", () => {
+  for (const [path, mustNotContain] of [
+    ["/a/x.rb", "require"],
+    ["/a/x.php", "import"],
+  ] as const) {
+    const plan = planFix(path, `key = "${FAKE.awsKey}"\n`, config);
+    assert.ok(!plan.updated.includes(mustNotContain), `${path} should not gain an import`);
+  }
+});
+
 test("an unsupported file type is left completely alone", () => {
   const source = `key = ${FAKE.awsKey}\n`;
   const plan = planFix("/a/notes.txt", source, config);

@@ -28,6 +28,81 @@ function languageOf(path: string): Language {
   return "unknown";
 }
 
+/**
+ * Adds whatever import the generated lookup needs.
+ *
+ * Without this, `fix` writes `os.environ["KEY"]` into a Python file that never
+ * imported os, and the code raises NameError the first time it runs. Go will
+ * not even compile. Emitting a reference to something that is not in scope is
+ * the same category of mistake as putting a lookup inside a string literal:
+ * the diff looks right and the program is broken.
+ *
+ * Ruby's ENV, PHP's getenv and Node's process.env are all globals, so nothing
+ * is needed for those.
+ */
+export function ensureImport(language: Language, source: string): string {
+  if (language === "python") {
+    // Only forms that actually bind the name `os` count. `from os import
+    // environ` binds environ alone, so os.environ would still be undefined —
+    // treating it as covered would leave exactly the breakage this prevents.
+    // `import os`, `import os, sys` and `import os.path` all do bind it.
+    if (/^\s*import\s+os\b(?!\s*\.\w+\s+as\b)/m.test(source)) return source;
+
+    const lines = source.split("\n");
+    let insertAt = 0;
+
+    // Shebang and encoding declaration must stay first.
+    if (lines[0]?.startsWith("#!")) insertAt = 1;
+    if (lines[insertAt]?.match(/coding[:=]/)) insertAt++;
+
+    // Step over a module docstring.
+    const afterPreamble = lines[insertAt]?.trimStart() ?? "";
+    const quote = afterPreamble.startsWith('"""') ? '"""' : afterPreamble.startsWith("'''") ? "'''" : null;
+    if (quote) {
+      const singleLine = afterPreamble.length > 3 && afterPreamble.trimEnd().endsWith(quote) && afterPreamble.trimEnd().length > 5;
+      if (singleLine) {
+        insertAt++;
+      } else {
+        insertAt++;
+        while (insertAt < lines.length && !lines[insertAt]!.includes(quote)) insertAt++;
+        insertAt++;
+      }
+    }
+
+    // `from __future__` imports have to precede everything else.
+    while (insertAt < lines.length && /^\s*from\s+__future__\s+import\b/.test(lines[insertAt]!)) insertAt++;
+
+    lines.splice(insertAt, 0, "import os");
+    return lines.join("\n");
+  }
+
+  if (language === "go") {
+    if (/^\s*import\s+"os"\s*$/m.test(source) || /^\s*"os"\s*$/m.test(source)) return source;
+
+    // Grouped block: import ( ... )
+    const grouped = source.match(/^import\s*\(\s*$/m);
+    if (grouped && grouped.index !== undefined) {
+      const insertAt = grouped.index + grouped[0].length;
+      return `${source.slice(0, insertAt)}\n\t"os"${source.slice(insertAt)}`;
+    }
+
+    // Single import: promote it to a block so both survive.
+    const single = source.match(/^import\s+("(?:[^"]+)")\s*$/m);
+    if (single && single.index !== undefined) {
+      return source.slice(0, single.index) + `import (\n\t"os"\n\t${single[1]}\n)` + source.slice(single.index + single[0].length);
+    }
+
+    // No imports at all: place one after the package clause.
+    const pkg = source.match(/^package\s+\w+\s*$/m);
+    if (pkg && pkg.index !== undefined) {
+      const insertAt = pkg.index + pkg[0].length;
+      return `${source.slice(0, insertAt)}\n\nimport "os"${source.slice(insertAt)}`;
+    }
+  }
+
+  return source;
+}
+
 function envLookup(language: Language, name: string): string | null {
   switch (language) {
     case "js":
@@ -221,6 +296,11 @@ export function planFix(path: string, source: string, config: Config, registry?:
 
   edits.reverse();
   manual.reverse();
+
+  // Only after every replacement is in, so the inserted line cannot shift the
+  // offsets the replacements were computed against.
+  if (edits.length > 0) updated = ensureImport(language, updated);
+
   return { path, language, edits, updated, manual };
 }
 
