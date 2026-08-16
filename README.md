@@ -23,12 +23,96 @@ Note what survived that round trip: the agent's edit (`db.internal` became
 could still reason about the file — it knew that was an AWS key and a Postgres
 password — it just could not read either one.
 
+---
+
+## Quickstart
+
+Three commands. About a minute.
+
+### 1. Install and wire it up
+
 ```bash
-npx secretgate init
+npm install -g secretgate
+secretgate init
 ```
 
-That detects which agents you have installed, wires every hook, and prints what
-it did. Roughly fifteen seconds. `secretgate uninstall` puts everything back.
+`init` finds the agents you already have, adds the hooks, and prints what it
+changed. It backs up every file it touches, and `secretgate uninstall` puts them
+all back exactly as they were.
+
+```
+secretgate init
+
+  + Claude Code    wired (backup: ~/.claude/settings.json.secretgate-backup-…)
+  + git pre-commit hook created
+  + secretgate.yml created
+
+  done — 2 hook(s) wired
+```
+
+### 2. Check it is actually running
+
+Use your agent normally for a minute, then:
+
+```bash
+secretgate doctor
+```
+
+```
+agents
+  Claude Code    firing, last seen 12s ago
+    UserPromptSubmit   12s ago   4x
+    PreToolUse         12s ago   9x
+```
+
+**`firing` is the word that matters.** If it says `wired, but has never fired`,
+the hook is configured but your agent is not calling it — so you are not
+protected. Nothing else in the output means anything until that says `firing`.
+
+### 3. That's it
+
+There is no step 3. From here on it works on its own:
+
+- Your agent is refused when it tries to read `.env`, `~/.aws/credentials`,
+  `id_rsa`, or run `cat .env` / `printenv`.
+- Any credential that reaches a prompt anyway is swapped for a placeholder like
+  `SECRETGATE_AWS_KEY_6B8A`, and the real value is put back locally when the
+  agent writes a file.
+- `git commit` is blocked if you are about to commit a credential.
+
+### Where do I put my `.env`?
+
+Leave it exactly where it is, in the project root. Moving it achieves nothing —
+the protection is not that the file is hidden, it is that the *read* is
+intercepted. `.env` and `.env.example` can sit side by side in the same folder:
+the agent is refused the first and allowed the second.
+
+### Try it without installing anything
+
+If you would rather see it work before wiring it into your editor:
+
+```bash
+printf 'AWS_ACCESS_KEY_ID=AKIA4KTNQ7VZL2WXMP3D\n' > /tmp/demo.env
+npx secretgate filter < /tmp/demo.env
+```
+
+```
+AWS_ACCESS_KEY_ID=SECRETGATE_AWS_KEY_6B8A
+```
+
+### Two useful extras
+
+```bash
+secretgate scan .          # find credentials already in your code
+secretgate fix .           # move them into .env (dry run; add --write to apply)
+```
+
+### If your agent is not supported
+
+Hooks only exist for **Claude Code** and **Cursor** today. For anything else
+there is nothing to intercept the read, so use the pipe form
+(`secretgate filter`) or rely on the git pre-commit hook. See
+[what is not built yet](#what-is-not-built-yet).
 
 ---
 
