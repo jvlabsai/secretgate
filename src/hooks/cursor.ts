@@ -36,6 +36,31 @@ function emit(response: object): void {
   process.stdout.write(`${JSON.stringify(response)}\n`);
 }
 
+/** Every field an edit payload has been known to carry the new text in. */
+function collectEditText(payload: CursorPayload): string {
+  const parts: string[] = [];
+
+  if (typeof payload.content === "string") parts.push(payload.content);
+
+  const edits = payload.edits;
+  if (Array.isArray(edits)) {
+    for (const edit of edits) {
+      if (typeof edit === "string") {
+        parts.push(edit);
+        continue;
+      }
+      if (edit && typeof edit === "object") {
+        for (const key of ["new_string", "newText", "newString", "text", "content", "after"]) {
+          const value = (edit as Record<string, unknown>)[key];
+          if (typeof value === "string") parts.push(value);
+        }
+      }
+    }
+  }
+
+  return parts.join("\n");
+}
+
 function allow(): void {
   emit({ permission: "allow" });
 }
@@ -117,7 +142,12 @@ export async function runCursorHook(): Promise<number> {
 
     case "afterFileEdit": {
       // Inbound: restore real values before the edit is written out.
-      const text = typeof payload.content === "string" ? payload.content : "";
+      //
+      // Cursor has described this payload more than one way across versions —
+      // sometimes whole file content, sometimes a list of edits. Reading every
+      // shape we know of costs nothing and means a rename does not silently
+      // turn this branch into a no-op.
+      const text = collectEditText(payload);
       if (text) {
         const { warnings } = guardInbound(text, config);
         if (warnings.length > 0) {

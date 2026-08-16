@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { guardOutbound, guardInbound, isSensitivePath, isSensitiveCommand, extractToolText } from "../src/hooks/shared.js";
@@ -128,6 +129,52 @@ test("redact mode swaps the secret and can put it back", () => {
   assert.equal(back.text, original);
   assert.equal(back.substituted, 1);
   assert.deepEqual(back.warnings, []);
+});
+
+function runCursor(payload: object): any {
+  const out = execFileSync(process.execPath, ["--import", "tsx", CLI, "hook", "cursor"], {
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+    env: { ...process.env, NO_COLOR: "1" },
+  });
+  return JSON.parse(out || "{}");
+}
+
+test("a cursor prompt carrying a credential is intercepted", () => {
+  const response = runCursor({ hook_event_name: "beforeSubmitPrompt", prompt: `key is ${AWS_KEY}` });
+  assert.equal(response.permission, "deny");
+  assert.ok(!JSON.stringify(response).includes(AWS_KEY), "the secret must not survive into the response");
+});
+
+test("a clean cursor prompt is allowed", () => {
+  assert.equal(runCursor({ hook_event_name: "beforeSubmitPrompt", prompt: "how do I write a retry loop?" }).permission, "allow");
+});
+
+test("cursor reading a .env is denied by path", () => {
+  assert.equal(runCursor({ hook_event_name: "beforeReadFile", file_path: "/app/.env" }).permission, "deny");
+});
+
+test("cursor running a credential-dumping command is denied", () => {
+  assert.equal(runCursor({ hook_event_name: "beforeShellExecution", command: "cat .env" }).permission, "deny");
+});
+
+test("a malformed cursor payload fails open", () => {
+  const out = execFileSync(process.execPath, ["--import", "tsx", CLI, "hook", "cursor"], {
+    input: "not json",
+    encoding: "utf8",
+    env: { ...process.env, NO_COLOR: "1" },
+  });
+  assert.equal(JSON.parse(out).permission, "allow");
+});
+
+test("cursor edit payloads are read in every shape we know of", () => {
+  // Cursor has described this payload more than one way across versions. A
+  // rename must not quietly turn the inbound branch into a no-op — that would
+  // stop edits being checked at all, with nothing to say so.
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "hooks", "cursor.ts"), "utf8");
+  for (const shape of ["new_string", "newText", "newString", "text", "content", "after"]) {
+    assert.ok(source.includes(shape), `edit payload shape not handled: ${shape}`);
+  }
 });
 
 test("inbound text with no placeholders is untouched", () => {

@@ -93,6 +93,37 @@ export async function runMcpProxy(argv: string[]): Promise<number> {
     process.exit(2);
   });
 
+  /**
+   * A proxy that crashes takes the agent's MCP server down with it, so every
+   * write has to survive the far end going away. The server exiting while the
+   * agent is still sending is entirely normal — it is how a server signals it
+   * is done — and an unhandled EPIPE turns that into a stack trace.
+   */
+  let childAlive = true;
+  child.stdin.on("error", () => {
+    childAlive = false;
+  });
+  process.stdout.on("error", () => {
+    /* the agent hung up; nothing useful left to do */
+  });
+
+  function toChild(line: string): void {
+    if (!childAlive || child.stdin.destroyed || !child.stdin.writable) return;
+    try {
+      child.stdin.write(`${line}\n`);
+    } catch {
+      childAlive = false;
+    }
+  }
+
+  function toAgent(line: string): void {
+    try {
+      process.stdout.write(`${line}\n`);
+    } catch {
+      /* agent closed the pipe */
+    }
+  }
+
   // agent -> server
   const fromAgent = createInterface({ input: process.stdin, crlfDelay: Infinity });
   fromAgent.on("line", (line) => {
@@ -103,7 +134,7 @@ export async function runMcpProxy(argv: string[]): Promise<number> {
     } catch {
       // Not JSON-RPC we understand. Pass it through untouched rather than
       // breaking a protocol we only partly model.
-      child.stdin.write(`${line}\n`);
+      toChild(line);
       return;
     }
 
@@ -113,10 +144,23 @@ export async function runMcpProxy(argv: string[]): Promise<number> {
       recordBeat("mcp-proxy", "redacted-request");
       process.stderr.write(`secretgate: redacted ${counter.n} credential(s) from ${message.method ?? "a request"}\n`);
     }
-    child.stdin.write(`${JSON.stringify(guarded)}\n`);
+    toChild(JSON.stringify(guarded));
   });
 
-  fromAgent.on("close", () => child.stdin.end());
+  fromAgent.on("close", () => {
+    if (childAlive && !child.stdin.destroyed) {
+      try {
+        child.stdin.end();
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+
+  child.on("close", () => {
+    childAlive = false;
+    fromAgent.close();
+  });
 
   // server -> agent
   const fromServer = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -126,7 +170,7 @@ export async function runMcpProxy(argv: string[]): Promise<number> {
     try {
       message = JSON.parse(line) as JsonRpc;
     } catch {
-      process.stdout.write(`${line}\n`);
+      toAgent(line);
       return;
     }
 
@@ -136,7 +180,7 @@ export async function runMcpProxy(argv: string[]): Promise<number> {
       recordBeat("mcp-proxy", "redacted-response");
       process.stderr.write(`secretgate: redacted ${counter.n} credential(s) from a server response\n`);
     }
-    process.stdout.write(`${JSON.stringify(guarded)}\n`);
+    toAgent(JSON.stringify(guarded));
   });
 
   return new Promise<number>((resolve) => {

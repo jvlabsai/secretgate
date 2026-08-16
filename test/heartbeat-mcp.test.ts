@@ -166,6 +166,57 @@ test("redactDeep does not recurse forever on a deeply nested payload", () => {
   assert.doesNotThrow(() => redactDeep(nested, config, { n: 0 }));
 });
 
+/**
+ * A proxy that crashes takes the agent's MCP server down with it. A server
+ * exiting while the agent is still sending is normal — it is how one signals it
+ * is finished — and an unhandled EPIPE turned that into a stack trace.
+ */
+test("the proxy survives the server exiting mid-stream", () => {
+  const home = tempDir();
+  try {
+    let input = "";
+    for (let i = 0; i < 200; i++) {
+      input += `${JSON.stringify({ jsonrpc: "2.0", id: i, method: "x", params: { a: "b" } })}\n`;
+    }
+
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", CLI, "mcp-proxy", "--", process.execPath, "-e", "process.exit(0)"],
+      {
+        input,
+        encoding: "utf8",
+        env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+        timeout: 60_000,
+      },
+    );
+
+    const stderr = result.stderr ?? "";
+    assert.ok(!stderr.includes("EPIPE"), `proxy crashed on a closed pipe:\n${stderr.slice(0, 400)}`);
+    assert.ok(!stderr.includes("Unhandled"), `unhandled error event:\n${stderr.slice(0, 400)}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the proxy reports a server it cannot start rather than hanging", () => {
+  const home = tempDir();
+  try {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", CLI, "mcp-proxy", "--", "definitely-not-a-real-binary-xyz"],
+      {
+        input: '{"jsonrpc":"2.0","id":1}\n',
+        encoding: "utf8",
+        env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+        timeout: 60_000,
+      },
+    );
+    assert.match(result.stderr ?? "", /could not start/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("the proxy relays a real JSON-RPC exchange and redacts on the way through", () => {
   // A minimal MCP-ish server: echoes back whatever params it is sent, which is
   // the shape that matters — a server returning file contents to the model.

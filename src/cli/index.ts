@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadConfig, defaultConfig, SAMPLE_CONFIG, CONFIG_FILENAMES, BASELINE_FILENAME, findUp } from "../config/index.js";
 import { scan, blocking } from "../core/scan.js";
@@ -12,7 +12,7 @@ import { runCursorHook } from "../hooks/cursor.js";
 import { runFilter } from "../hooks/generic.js";
 import { runPreCommit } from "../hooks/git.js";
 import { runMcpProxy } from "../hooks/mcp-proxy.js";
-import { planFix, applyEnvFiles, writeSource } from "./fix.js";
+import { planFix, applyEnvFiles, writeSource, createRegistry, findProjectRoot } from "./fix.js";
 import { detectAgents, installClaudeCode, installCursor, installGitHook, uninstallAll, installedRecords, STATE_DIR } from "./install.js";
 import { clearStore, storeStatus, VAULT_PATH } from "../core/vault-store.js";
 import { readHeartbeat, agentHealth, humanAge, clearHeartbeat } from "../core/heartbeat.js";
@@ -163,6 +163,12 @@ function cmdFix(target: string, write: boolean): number {
   const config = loadConfig(statSync(root).isDirectory() ? root : process.cwd());
   const files = statSync(root).isDirectory() ? [...walk(root)] : [root];
 
+  // One registry for the whole run, seeded from any existing .env. Naming per
+  // file would let two files that both say `apiKey` collapse onto one variable,
+  // and the second file would end up reading the first one's credential.
+  const projectRoot = findProjectRoot(statSync(root).isDirectory() ? root : dirname(root));
+  const registry = createRegistry(join(projectRoot, ".env"));
+
   let touched = 0;
   let total = 0;
   const warnings = new Set<string>();
@@ -177,7 +183,7 @@ function cmdFix(target: string, write: boolean): number {
     }
     if (source.indexOf(NUL) !== -1) continue;
 
-    const plan = planFix(file, source, config);
+    const plan = planFix(file, source, config, registry);
     if (plan.edits.length === 0 && plan.manual.length === 0) continue;
 
     const shown = relative(process.cwd(), file) || file;

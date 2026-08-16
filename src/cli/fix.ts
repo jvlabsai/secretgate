@@ -51,6 +51,41 @@ function envLookup(language: Language, name: string): string | null {
  * Prefers the identifier the value was already assigned to, since that is what
  * the developer has been calling it. Falls back to the provider.
  */
+/**
+ * Names have to be assigned across the whole run, not per file.
+ *
+ * With a per-file counter, two files that both call their constant `apiKey`
+ * each derive `API_KEY`. The first write wins in `.env`, the second is skipped
+ * as a duplicate — and the second file, already rewritten to
+ * `process.env.API_KEY`, now silently reads the *first* file's credential while
+ * its own is lost entirely. Wrong value at runtime and data loss, with nothing
+ * in the output to suggest it happened.
+ *
+ * So: one registry for the run. The same value always maps to the same name,
+ * which is the correct dedupe. Different values never share a name, even when
+ * the surrounding code calls them the same thing.
+ */
+export interface NameRegistry {
+  byValue: Map<string, string>;
+  taken: Set<string>;
+}
+
+/** Seeded from any existing .env so we neither collide with nor duplicate it. */
+export function createRegistry(envPath: string): NameRegistry {
+  const registry: NameRegistry = { byValue: new Map(), taken: new Set() };
+  if (!existsSync(envPath)) return registry;
+
+  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+    const name = match[1]!;
+    const value = (match[2] ?? "").replace(/^["']|["']$/g, "");
+    registry.taken.add(name);
+    if (value && !registry.byValue.has(value)) registry.byValue.set(value, name);
+  }
+  return registry;
+}
+
 export function deriveEnvName(source: string, finding: Finding, taken: Set<string>, spanStart?: number): string {
   // Names come from the assignment, so start looking from the whole literal
   // rather than from the secret. Otherwise `postgres://svc:pw@host` yields
@@ -135,7 +170,7 @@ export function enclosingLiteral(source: string, index: number): { start: number
   return null;
 }
 
-export function planFix(path: string, source: string, config: Config): FixResult {
+export function planFix(path: string, source: string, config: Config, registry?: NameRegistry): FixResult {
   const language = languageOf(path);
   const findings = blocking(scan(source, { ...config, path }).findings, config);
 
@@ -144,7 +179,7 @@ export function planFix(path: string, source: string, config: Config): FixResult
     return { path, language, edits: [], updated: source, skipped: "unsupported file type", manual: [] };
   }
 
-  const taken = new Set<string>();
+  const names = registry ?? { byValue: new Map<string, string>(), taken: new Set<string>() };
   const edits: FixEdit[] = [];
   const manual: { line: number; reason: string }[] = [];
   let updated = source;
@@ -169,7 +204,11 @@ export function planFix(path: string, source: string, config: Config): FixResult
       continue;
     }
 
-    const name = deriveEnvName(source, finding, taken, literal.start);
+    // The same secret in two places is one variable; two different secrets are
+    // never allowed to become one, whatever the surrounding code calls them.
+    const name = names.byValue.get(contents) ?? deriveEnvName(source, finding, names.taken, literal.start);
+    names.byValue.set(contents, name);
+
     const lookup = envLookup(language, name);
     if (!lookup) continue;
 

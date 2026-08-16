@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planFix, applyEnvFiles, deriveEnvName } from "../src/cli/fix.js";
+import { planFix, applyEnvFiles, deriveEnvName, createRegistry } from "../src/cli/fix.js";
 import { defaultConfig } from "../src/config/index.js";
 import { scan, blocking } from "../src/core/scan.js";
 import { FAKE } from "./fixtures.js";
@@ -226,6 +226,101 @@ test("an existing key in .env is not appended twice", () => {
     assert.deepEqual(result.added, []);
     const env = readFileSync(join(dir, ".env"), "utf8");
     assert.equal(env.match(/^API_KEY=/gm)?.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The regression this guards is the nastiest bug this command has had.
+ *
+ * Two files both calling their constant `apiKey` each derived API_KEY. The
+ * first won in .env, the second was skipped as a duplicate, and the second
+ * file — already rewritten to process.env.API_KEY — silently read the first
+ * file's credential while its own vanished entirely. Wrong value at runtime,
+ * data loss, and nothing in the output to suggest it.
+ */
+test("two files with the same identifier but different secrets get different variables", () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(join(dir, "package.json"), "{}");
+    writeFileSync(join(dir, ".gitignore"), ".env\n");
+
+    const a = join(dir, "a.ts");
+    const b = join(dir, "b.ts");
+    const sourceA = `export const apiKey = "${FAKE.awsKey}";\n`;
+    const sourceB = `export const apiKey = "${FAKE.awsKeyAlt}";\n`;
+    writeFileSync(a, sourceA);
+    writeFileSync(b, sourceB);
+
+    const registry = createRegistry(join(dir, ".env"));
+
+    const planA = planFix(a, sourceA, config, registry);
+    applyEnvFiles(a, planA.edits, true);
+    writeFileSync(a, planA.updated);
+
+    const planB = planFix(b, sourceB, config, registry);
+    applyEnvFiles(b, planB.edits, true);
+    writeFileSync(b, planB.updated);
+
+    assert.notEqual(planA.edits[0]!.name, planB.edits[0]!.name, "different secrets must not share a variable");
+
+    const env = readFileSync(join(dir, ".env"), "utf8");
+    assert.ok(env.includes(FAKE.awsKey), "the first secret must be in .env");
+    assert.ok(env.includes(FAKE.awsKeyAlt), "the second secret must be in .env too, not silently dropped");
+
+    // And each file must reference its own value.
+    const nameA = planA.edits[0]!.name;
+    const nameB = planB.edits[0]!.name;
+    assert.match(readFileSync(a, "utf8"), new RegExp(`process\\.env\\.${nameA}`));
+    assert.match(readFileSync(b, "utf8"), new RegExp(`process\\.env\\.${nameB}`));
+    assert.match(env, new RegExp(`^${nameA}=${FAKE.awsKey}$`, "m"));
+    assert.match(env, new RegExp(`^${nameB}=${FAKE.awsKeyAlt}$`, "m"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the same secret in two files collapses to one variable", () => {
+  const dir = tempDir();
+  try {
+    const registry = createRegistry(join(dir, ".env"));
+    const source = `export const apiKey = "${FAKE.awsKey}";\n`;
+
+    const planA = planFix(join(dir, "a.ts"), source, config, registry);
+    const planB = planFix(join(dir, "b.ts"), source, config, registry);
+
+    assert.equal(planA.edits[0]!.name, planB.edits[0]!.name, "one secret is one variable");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a name already used in .env for a different value is not reused", () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(join(dir, ".env"), `API_KEY=${FAKE.awsKeyAlt}\n`);
+    const registry = createRegistry(join(dir, ".env"));
+
+    const source = `export const apiKey = "${FAKE.awsKey}";\n`;
+    const plan = planFix(join(dir, "a.ts"), source, config, registry);
+
+    assert.notEqual(plan.edits[0]!.name, "API_KEY", "must not collide with the existing entry");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a value already in .env reuses its existing variable name", () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(join(dir, ".env"), `EXISTING_NAME=${FAKE.awsKey}\n`);
+    const registry = createRegistry(join(dir, ".env"));
+
+    const source = `export const apiKey = "${FAKE.awsKey}";\n`;
+    const plan = planFix(join(dir, "a.ts"), source, config, registry);
+
+    assert.equal(plan.edits[0]!.name, "EXISTING_NAME", "do not add a second variable for a value already there");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
