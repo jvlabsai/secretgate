@@ -25,6 +25,39 @@ password — it just could not read either one.
 
 ---
 
+## First — which agent are you using?
+
+This decides how you use secretgate, so answer it before installing anything.
+
+| Your agent | What protects you |
+|---|---|
+| **Claude Code** | Hooks — `secretgate init` |
+| **Cursor** | Hooks, beta and unverified — `secretgate init` |
+| **Gemini / Antigravity, Copilot, Codex, Windsurf, Aider, everything else** | **`secretgate lock`** — hooks cannot work |
+
+A hook is code your agent calls before it reads a file. **Only Claude Code and
+Cursor expose one.** For every other agent there is nothing for secretgate to
+attach to, so it cannot intercept a read — and running `init` will not protect
+you, however successful it looks.
+
+That is a limit of how those tools work, not something being worked around
+quietly. For any unsupported agent, use `lock`, which needs no cooperation from
+the agent at all:
+
+```bash
+secretgate lock .     # .env values become placeholders; real ones move out of the project
+# ... let the agent do its work ...
+secretgate unlock .   # values come back, byte for byte
+```
+
+**`secretgate doctor` tells you which situation you are in.** If it says
+`NOT PROTECTED`, hooks are not firing and `lock` is your answer.
+
+New here? [**docs/GETTING-STARTED.md**](docs/GETTING-STARTED.md) is a worked
+example you can paste into a terminal.
+
+---
+
 ## Quickstart
 
 Three commands. About a minute.

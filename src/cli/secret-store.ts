@@ -14,8 +14,15 @@ import { basename, dirname } from "node:path";
 const SECRET_STORE =
   /^\.env(?!\.(?:example|sample|template|dist|schema|defaults)\b)(\.[\w-]+)*$|^\.npmrc$|^\.netrc$|^\.pypirc$/i;
 
+// Anything that is plainly a copy rather than the live file. `.env.local.bak`
+// matched the pattern above quite happily, which is how `lock` came to overwrite
+// its own backup and destroy the only remaining copy of the values.
+const DERIVED = /\.(?:bak|backup|orig|save|swp|tmp|old|copy)$|~$/i;
+
 export function isSecretStore(path: string): boolean {
-  return SECRET_STORE.test(basename(path));
+  const name = basename(path);
+  if (DERIVED.test(name)) return false;
+  return SECRET_STORE.test(name);
 }
 
 export type IgnoreStatus = "ignored" | "not-ignored" | "no-repo";

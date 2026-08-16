@@ -17,6 +17,7 @@ import { detectAgents, installClaudeCode, installCursor, installGitHook, uninsta
 import { clearStore, storeStatus, VAULT_PATH } from "../core/vault-store.js";
 import { readHeartbeat, agentHealth, humanAge, clearHeartbeat } from "../core/heartbeat.js";
 import { isSecretStore, assessStore, type StoreVerdict } from "./secret-store.js";
+import { lockEnvFile, unlockEnvFile, BACKUP_DIR } from "./lock.js";
 
 // No colour library. Five SGR codes are the whole requirement, and they go
 // quiet when stdout is not a terminal or NO_COLOR is set.
@@ -42,6 +43,8 @@ const USAGE = `${c.bold("secretgate")} — keep credentials out of your AI codin
   secretgate init              detect installed agents and wire every hook
   secretgate scan [path]       scan a file or directory
   secretgate fix [path]        move hardcoded secrets into .env (--write to apply)
+  secretgate lock [path]       blank out .env values so ANY agent reads placeholders
+  secretgate unlock [path]     put the real values back
   secretgate filter            stdin -> stdout, redacted (--rehydrate to reverse)
   secretgate baseline          accept every current finding
   secretgate doctor            check what is wired up and whether it is firing
@@ -69,7 +72,23 @@ function out(s = ""): void {
 
 // --- scan -----------------------------------------------------------------
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "out", ".next", "vendor", "target", ".venv", "__pycache__"]);
+// `.secretgate` is in here for a reason worth remembering: without it, `lock`
+// walked into its own backup directory, treated the backup as another .env, and
+// locked it too. The one copy of the real values was then placeholders, so
+// `unlock` had nothing to fall back on and the secret was gone.
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".secretgate",
+  "dist",
+  "build",
+  "out",
+  ".next",
+  "vendor",
+  "target",
+  ".venv",
+  "__pycache__",
+]);
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const NUL = String.fromCharCode(0);
 
@@ -272,6 +291,94 @@ function cmdFix(target: string, write: boolean): number {
   return 0;
 }
 
+// --- lock / unlock ---------------------------------------------------------
+
+function envFilesIn(dir: string): string[] {
+  const found: string[] = [];
+  for (const file of walk(dir)) {
+    if (isSecretStore(file)) found.push(file);
+  }
+  return found;
+}
+
+function cmdLock(target: string): number {
+  const root = resolve(target);
+  const config = loadConfig(statSync(root).isDirectory() ? root : process.cwd());
+  const files = statSync(root).isDirectory() ? envFilesIn(root) : [root];
+
+  if (files.length === 0) {
+    out(`${c.yellow("no .env files found")} under ${relative(process.cwd(), root) || root}`);
+    return 0;
+  }
+
+  out("");
+  let locked = 0;
+  for (const file of files) {
+    const result = lockEnvFile(file, config);
+    const name = relative(process.cwd(), file) || file;
+
+    if (result.alreadyLocked) {
+      out(`  ${c.dim("=")} ${name.padEnd(24)} ${c.dim("already locked")}`);
+    } else if (result.skipped) {
+      out(`  ${c.dim("-")} ${name.padEnd(24)} ${c.dim(result.skipped)}`);
+    } else {
+      locked += result.locked;
+      out(`  ${c.green("+")} ${name.padEnd(24)} ${c.green(`${result.locked} value(s) replaced with placeholders`)}`);
+    }
+  }
+
+  out("");
+  if (locked > 0) {
+    out(`${c.green("locked")}  the agent now reads placeholders, not credentials`);
+    out(c.dim(`  real values are in ${VAULT_PATH}, outside this project`));
+    out(c.dim(`  backups are in ${BACKUP_DIR}`));
+    out("");
+    out(c.yellow("  Your app will not run until you unlock — the environment holds"));
+    out(c.yellow("  placeholders now. Run: secretgate unlock"));
+  } else {
+    out(c.dim("  nothing to do"));
+  }
+  out("");
+  return 0;
+}
+
+function cmdUnlock(target: string): number {
+  const root = resolve(target);
+  const files = statSync(root).isDirectory() ? envFilesIn(root) : [root];
+
+  out("");
+  let restored = 0;
+  let problems = 0;
+
+  for (const file of files) {
+    const result = unlockEnvFile(file);
+    const name = relative(process.cwd(), file) || file;
+
+    if (result.skipped) {
+      out(`  ${c.dim("-")} ${name.padEnd(24)} ${c.dim(result.skipped)}`);
+      continue;
+    }
+    if (result.usedBackup) {
+      restored++;
+      out(`  ${c.green("+")} ${name.padEnd(24)} ${c.yellow("restored from backup")}`);
+      continue;
+    }
+    if (result.warnings.length > 0) {
+      problems++;
+      out(`  ${c.red("!")} ${name.padEnd(24)} ${c.red("could not fully restore")}`);
+      for (const w of result.warnings) out(`      ${c.dim(w)}`);
+      continue;
+    }
+    restored++;
+    out(`  ${c.green("+")} ${name.padEnd(24)} ${c.green(`${result.restored} value(s) restored`)}`);
+  }
+
+  out("");
+  out(restored > 0 ? c.green(`unlocked  ${restored} file(s)`) : c.dim("  nothing was locked"));
+  out("");
+  return problems > 0 ? 1 : 0;
+}
+
 // --- baseline -------------------------------------------------------------
 
 function cmdBaseline(target: string): number {
@@ -364,6 +471,24 @@ function cmdInit(): number {
   out("");
   out(wired > 0 ? c.green(`  done — ${wired} hook(s) wired`) : c.dim("  everything was already wired"));
   out(c.dim(`  undo at any time with "secretgate uninstall"`));
+
+  // The failure mode this exists to prevent: someone installs secretgate,
+  // sees it succeed, and assumes they are covered — while the agent they
+  // actually use has no adapter and reads .env freely. Silence here reads as
+  // protection, so say it out loud.
+  const unsupported = agents.filter((a) => a.present && !a.supported);
+  out("");
+  out(c.bold("  Important: hooks only work for Claude Code and Cursor."));
+  if (unsupported.length > 0) {
+    out(c.yellow(`  You also have ${unsupported.map((a) => a.name).join(", ")} installed, which secretgate cannot hook.`));
+  }
+  out(c.dim("  For any other agent — Gemini, Copilot, Codex, Windsurf, Aider — there is"));
+  out(c.dim("  no hook to intercept the read, so .env is NOT protected. Use instead:"));
+  out("");
+  out(`    ${c.bold("secretgate lock")}     blank out .env values before letting the agent work`);
+  out(`    ${c.bold("secretgate unlock")}   put them back when you are done`);
+  out("");
+  out(c.dim(`  Check whether hooks are really firing with: secretgate doctor`));
   out("");
   return 0;
 }
@@ -427,6 +552,19 @@ function cmdDoctor(): number {
   const gitWired = gitHook && existsSync(gitHook) && readFileSync(gitHook, "utf8").includes("secretgate");
   out(`    ${"git pre-commit".padEnd(14)} ${gitWired ? c.green("wired") : c.yellow(gitRoot ? "not wired" : "not a git repo")}`);
   out("");
+
+  // The headline verdict, before any detail. "Installed" and "protecting you"
+  // are different states, and only one of them matters.
+  const anyFiring = beats.some((b) => b.lastSeen !== undefined);
+  out("");
+  if (anyFiring) {
+    out(`  ${c.green("PROTECTED")}  a hook has fired, so secretgate is in the path`);
+  } else {
+    out(`  ${c.red("NOT PROTECTED")}  no hook has ever fired on this machine`);
+    out(c.dim("    Either you have not used a supported agent yet, or the agent you use"));
+    out(c.dim("    has no adapter. Only Claude Code and Cursor can be hooked today."));
+    out(c.dim("    For anything else, use: secretgate lock  /  secretgate unlock"));
+  }
 
   // Prove the engine actually works right now rather than merely being present.
   // Built from fragments so this file contains no contiguous key-shaped string:
@@ -535,6 +673,10 @@ async function main(): Promise<number> {
       return cmdScan(arg ?? ".", { json: !!values.json, mode: values.mode as string | undefined });
     case "fix":
       return cmdFix(arg ?? ".", !!values.write);
+    case "lock":
+      return cmdLock(arg ?? ".");
+    case "unlock":
+      return cmdUnlock(arg ?? ".");
     case "mcp-proxy": {
       // Everything after `--` is the server command, untouched.
       const sep = process.argv.indexOf("--");
