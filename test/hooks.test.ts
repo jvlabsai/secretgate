@@ -13,12 +13,19 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "i
 const AWS_KEY = FAKE.awsKey;
 
 function runHook(payload: object): any {
-  const out = execFileSync(process.execPath, ["--import", "tsx", CLI, "hook", "claude-code"], {
-    input: JSON.stringify(payload),
-    encoding: "utf8",
-    env: { ...process.env, NO_COLOR: "1" },
-  });
-  return JSON.parse(out || "{}");
+  // A deny exits 2 — that is how the hook contract signals "block" — so a
+  // non-zero exit is an expected outcome here, not a failure to report.
+  try {
+    const out = execFileSync(process.execPath, ["--import", "tsx", CLI, "hook", "claude-code"], {
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    return JSON.parse(out || "{}");
+  } catch (err) {
+    const stdout = (err as { stdout?: string }).stdout ?? "";
+    return JSON.parse(stdout || "{}");
+  }
 }
 
 test("a clean prompt passes straight through", () => {
@@ -132,12 +139,16 @@ test("redact mode swaps the secret and can put it back", () => {
 });
 
 function runCursor(payload: object): any {
-  const out = execFileSync(process.execPath, ["--import", "tsx", CLI, "hook", "cursor"], {
-    input: JSON.stringify(payload),
-    encoding: "utf8",
-    env: { ...process.env, NO_COLOR: "1" },
-  });
-  return JSON.parse(out || "{}");
+  try {
+    const out = execFileSync(process.execPath, ["--import", "tsx", CLI, "hook", "cursor"], {
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    return JSON.parse(out || "{}");
+  } catch (err) {
+    return JSON.parse((err as { stdout?: string }).stdout ?? "{}");
+  }
 }
 
 test("a cursor prompt carrying a credential is intercepted", () => {

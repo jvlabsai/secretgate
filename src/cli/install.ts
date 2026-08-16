@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, chmodSync, rmSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
+import type { Capability } from "../hooks/decide.js";
 
 export const STATE_DIR = join(homedir(), ".secretgate");
 const MANIFEST = join(STATE_DIR, "install.json");
@@ -57,6 +58,12 @@ export interface DetectedAgent {
   file: string;
   present: boolean;
   supported: boolean;
+  /**
+   * What this host can actually do about a finding. Surfaced by `doctor`
+   * because someone on a block-only agent must never be left believing their
+   * values are being redacted and restored.
+   */
+  capability: Capability | "none";
   note?: string;
 }
 
@@ -66,6 +73,9 @@ export function detectAgents(): DetectedAgent[] {
 
   const claudeDir = join(home, ".claude");
   const cursorDir = win ? join(home, "AppData", "Roaming", "Cursor") : join(home, ".cursor");
+  const geminiDir = join(home, ".gemini");
+  const antigravityDir = win ? join(home, "AppData", "Roaming", "Antigravity") : join(home, ".antigravity");
+  const copilotDir = join(home, ".copilot");
   const codexDir = join(home, ".codex");
   const windsurfDir = join(home, ".codeium", "windsurf");
   const aiderConf = join(home, ".aider.conf.yml");
@@ -77,6 +87,7 @@ export function detectAgents(): DetectedAgent[] {
       file: join(claudeDir, "settings.json"),
       present: existsSync(claudeDir),
       supported: true,
+      capability: "redact",
     },
     {
       id: "cursor",
@@ -84,22 +95,50 @@ export function detectAgents(): DetectedAgent[] {
       file: join(cursorDir, "hooks.json"),
       present: existsSync(cursorDir),
       supported: true,
+      capability: "redact",
     },
     {
-      id: "codex",
-      name: "Codex",
-      file: join(codexDir, "config.toml"),
-      present: existsSync(codexDir),
-      supported: false,
-      note: "Adapter not written yet. Use `secretgate filter`.",
+      id: "gemini",
+      name: "Gemini CLI",
+      file: join(geminiDir, "settings.json"),
+      present: existsSync(geminiDir),
+      supported: true,
+      capability: "redact",
+    },
+    {
+      id: "antigravity",
+      name: "Antigravity",
+      file: join(antigravityDir, "hooks.json"),
+      present: existsSync(antigravityDir),
+      supported: true,
+      capability: "redact",
+    },
+    {
+      id: "copilot",
+      name: "GitHub Copilot",
+      file: join(copilotDir, "config.json"),
+      present: existsSync(copilotDir),
+      supported: true,
+      capability: "redact",
+      note: "No post-tool event, so placeholders are not restored automatically.",
     },
     {
       id: "windsurf",
       name: "Windsurf",
-      file: join(windsurfDir, "settings.json"),
+      file: join(windsurfDir, "hooks.json"),
       present: existsSync(windsurfDir),
-      supported: false,
-      note: "Adapter not written yet. Use `secretgate filter`.",
+      supported: true,
+      capability: "block",
+      note: "Block only — this host cannot rewrite tool input, so nothing is redacted.",
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      file: join(codexDir, "hooks.json"),
+      present: existsSync(codexDir),
+      supported: true,
+      capability: "partial",
+      note: "Needs [features] codex_hooks = true, and only sees Bash — file reads are not covered.",
     },
     {
       id: "aider",
@@ -107,7 +146,8 @@ export function detectAgents(): DetectedAgent[] {
       file: aiderConf,
       present: existsSync(aiderConf),
       supported: false,
-      note: "Adapter not written yet. Use `secretgate filter`.",
+      capability: "none",
+      note: "Aider has no hook system. Use `secretgate lock` before letting it work.",
     },
   ];
 }
@@ -236,6 +276,173 @@ export function installCursor(): { changed: boolean; file: string; note: string 
   writeManifest(manifest);
 
   return { changed: true, file, note: existed ? `wired (backup: ${record.backup})` : "wired (file created)" };
+}
+
+// --- generic JSON hook installer ------------------------------------------
+
+/**
+ * Most of these hosts keep hooks in a JSON file under a per-event key. The
+ * differences are the path, the key names and the entry shape, so they share
+ * one installer rather than five near-identical copies.
+ */
+function installJsonHooks(opts: {
+  agent: string;
+  file: string;
+  apply: (settings: Record<string, any>) => void;
+}): { changed: boolean; file: string; note: string } {
+  const { agent, file, apply } = opts;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const existed = existsSync(file);
+
+  let settings: Record<string, any> = {};
+  if (existed) {
+    const raw = readFileSync(file, "utf8");
+    try {
+      settings = raw.trim() ? JSON.parse(raw) : {};
+    } catch {
+      // Never rewrite a file we could not read: that would discard settings we
+      // failed to parse.
+      return { changed: false, file, note: `could not parse ${file}; left untouched. Fix the JSON and re-run.` };
+    }
+  }
+
+  const before = JSON.stringify(settings);
+  apply(settings);
+  if (before === JSON.stringify(settings)) return { changed: false, file, note: "already wired" };
+
+  const manifest = readManifest();
+  const record: InstallRecord = { agent, file };
+
+  mkdirSync(dirname(file), { recursive: true });
+  if (existed) record.backup = backup(file, stamp);
+  else record.created = true;
+
+  writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+
+  manifest.records = manifest.records.filter((r) => r.file !== file);
+  manifest.records.push(record);
+  manifest.installedAt = new Date().toISOString();
+  writeManifest(manifest);
+
+  return { changed: true, file, note: existed ? `wired (backup: ${record.backup})` : "wired (file created)" };
+}
+
+function alreadyOurs(entries: unknown): boolean {
+  if (!Array.isArray(entries)) return false;
+  return JSON.stringify(entries).includes("secretgate");
+}
+
+// --- gemini ---------------------------------------------------------------
+
+export function installGemini(): { changed: boolean; file: string; note: string } {
+  return installJsonHooks({
+    agent: "gemini",
+    file: join(homedir(), ".gemini", "settings.json"),
+    apply: (settings) => {
+      settings.hooks ??= {};
+      for (const event of ["BeforeTool", "AfterTool"]) {
+        const existing = settings.hooks[event] ?? [];
+        if (alreadyOurs(existing)) continue;
+        settings.hooks[event] = [
+          ...existing,
+          { matcher: "*", hooks: [{ type: "command", command: "secretgate hook gemini" }] },
+        ];
+      }
+    },
+  });
+}
+
+// --- antigravity ----------------------------------------------------------
+
+export function installAntigravity(): { changed: boolean; file: string; note: string } {
+  const dir =
+    platform() === "win32" ? join(homedir(), "AppData", "Roaming", "Antigravity") : join(homedir(), ".antigravity");
+  return installJsonHooks({
+    agent: "antigravity",
+    file: join(dir, "hooks.json"),
+    apply: (settings) => {
+      settings.hooks ??= {};
+      for (const event of ["PreToolUse", "PostToolUse"]) {
+        const existing = settings.hooks[event] ?? [];
+        if (alreadyOurs(existing)) continue;
+        // Matchers here are regular expressions, not the glob-ish strings
+        // Claude Code accepts.
+        settings.hooks[event] = [...existing, { matcher: ".*", command: "secretgate hook antigravity" }];
+      }
+    },
+  });
+}
+
+// --- copilot --------------------------------------------------------------
+
+export function installCopilot(): { changed: boolean; file: string; note: string } {
+  return installJsonHooks({
+    agent: "copilot",
+    file: join(homedir(), ".copilot", "config.json"),
+    apply: (settings) => {
+      settings.hooks ??= {};
+      const existing = settings.hooks.preToolUse ?? [];
+      if (!alreadyOurs(existing)) {
+        settings.hooks.preToolUse = [...existing, { command: "secretgate hook copilot" }];
+      }
+    },
+  });
+}
+
+// --- windsurf -------------------------------------------------------------
+
+export function installWindsurf(): { changed: boolean; file: string; note: string } {
+  return installJsonHooks({
+    agent: "windsurf",
+    file: join(homedir(), ".codeium", "windsurf", "hooks.json"),
+    apply: (settings) => {
+      settings.hooks ??= {};
+      for (const event of ["pre_read_code", "pre_run_command"]) {
+        const existing = settings.hooks[event] ?? [];
+        if (alreadyOurs(existing)) continue;
+        settings.hooks[event] = [...existing, { command: "secretgate hook windsurf" }];
+      }
+    },
+  });
+}
+
+// --- codex ----------------------------------------------------------------
+
+/**
+ * Codex hooks sit behind a feature flag in config.toml. Wiring hooks.json
+ * without it produces a config that looks correct and never fires, so the flag
+ * is checked and reported rather than assumed.
+ */
+export function codexHooksEnabled(): boolean {
+  const configPath = join(homedir(), ".codex", "config.toml");
+  if (!existsSync(configPath)) return false;
+  try {
+    return /^\s*codex_hooks\s*=\s*true\s*$/m.test(readFileSync(configPath, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+export function installCodex(): { changed: boolean; file: string; note: string } {
+  const result = installJsonHooks({
+    agent: "codex",
+    file: join(homedir(), ".codex", "hooks.json"),
+    apply: (settings) => {
+      settings.hooks ??= {};
+      const existing = settings.hooks.PreToolUse ?? [];
+      if (!alreadyOurs(existing)) {
+        settings.hooks.PreToolUse = [...existing, { command: "secretgate hook codex" }];
+      }
+    },
+  });
+
+  if (!codexHooksEnabled()) {
+    return {
+      ...result,
+      note: `${result.note} — but hooks are OFF. Add [features] codex_hooks = true to ~/.codex/config.toml or nothing will fire.`,
+    };
+  }
+  return result;
 }
 
 // --- git pre-commit -------------------------------------------------------

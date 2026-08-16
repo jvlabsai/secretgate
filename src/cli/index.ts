@@ -9,11 +9,29 @@ import { fingerprint } from "../core/suppress.js";
 import { allRules } from "../core/rules/index.js";
 import { runClaudeCodeHook } from "../hooks/claude-code.js";
 import { runCursorHook } from "../hooks/cursor.js";
+import { runGeminiHook } from "../hooks/gemini.js";
+import { runAntigravityHook } from "../hooks/antigravity.js";
+import { runCopilotHook } from "../hooks/copilot.js";
+import { runWindsurfHook } from "../hooks/windsurf.js";
+import { runCodexHook } from "../hooks/codex.js";
 import { runFilter } from "../hooks/generic.js";
 import { runPreCommit } from "../hooks/git.js";
 import { runMcpProxy } from "../hooks/mcp-proxy.js";
 import { planFix, applyEnvFiles, writeSource, createRegistry, findProjectRoot } from "./fix.js";
-import { detectAgents, installClaudeCode, installCursor, installGitHook, uninstallAll, installedRecords, STATE_DIR } from "./install.js";
+import {
+  detectAgents,
+  installClaudeCode,
+  installCursor,
+  installGemini,
+  installAntigravity,
+  installCopilot,
+  installWindsurf,
+  installCodex,
+  installGitHook,
+  uninstallAll,
+  installedRecords,
+  STATE_DIR,
+} from "./install.js";
 import { clearStore, storeStatus, VAULT_PATH } from "../core/vault-store.js";
 import { readHeartbeat, agentHealth, humanAge, clearHeartbeat } from "../core/heartbeat.js";
 import { isSecretStore, assessStore, type StoreVerdict } from "./secret-store.js";
@@ -53,9 +71,9 @@ const USAGE = `${c.bold("secretgate")} — keep credentials out of your AI codin
   secretgate vault             show the local placeholder store (--clear to wipe)
 
   secretgate mcp-proxy -- <cmd>  guard an MCP server's stdio in both directions
-  secretgate hook claude-code    hook entry point (not for humans)
-  secretgate hook cursor         hook entry point (not for humans)
-  secretgate hook pre-commit     git hook entry point
+  secretgate hook <agent>        hook entry point (not for humans)
+                                 claude-code | cursor | gemini | antigravity
+                                 copilot | windsurf | codex | pre-commit
 
 Options
   --mode <redact|block|warn>   override the configured mode
@@ -445,10 +463,35 @@ function cmdInit(): number {
       continue;
     }
 
-    const result = agent.id === "cursor" ? installCursor() : installClaudeCode();
+    const installers: Record<string, () => { changed: boolean; file: string; note: string }> = {
+      "claude-code": installClaudeCode,
+      cursor: installCursor,
+      gemini: installGemini,
+      antigravity: installAntigravity,
+      copilot: installCopilot,
+      windsurf: installWindsurf,
+      codex: installCodex,
+    };
+    const install = installers[agent.id];
+    if (!install) {
+      out(`  ${c.dim("-")} ${agent.name.padEnd(14)} ${c.dim("no installer")}`);
+      continue;
+    }
+    const result = install();
     if (result.changed) wired++;
     const mark = result.changed ? c.green("+") : c.dim("=");
-    out(`  ${mark} ${agent.name.padEnd(14)} ${result.changed ? c.green(result.note) : c.dim(result.note)}`);
+
+    // Deliberately never says "protected". Wiring a hook is not evidence the
+    // host will call it, and claiming otherwise before a single heartbeat is
+    // exactly the false assurance that let a live token reach a model.
+    const cap =
+      agent.capability === "block"
+        ? c.yellow(" [block only — cannot redact]")
+        : agent.capability === "partial"
+          ? c.yellow(" [partial, block only]")
+          : "";
+    out(`  ${mark} ${agent.name.padEnd(16)} ${result.changed ? c.green(result.note) : c.dim(result.note)}${cap}`);
+    if (agent.note) out(`      ${c.dim(agent.note)}`);
   }
 
   const repoRoot = findGitRoot(process.cwd());
@@ -471,6 +514,10 @@ function cmdInit(): number {
   out("");
   out(wired > 0 ? c.green(`  done — ${wired} hook(s) wired`) : c.dim("  everything was already wired"));
   out(c.dim(`  undo at any time with "secretgate uninstall"`));
+  out("");
+  out(c.yellow("  Wired is not the same as working."));
+  out(c.dim("  Use your agent once, then run `secretgate doctor`. Nothing here is"));
+  out(c.dim("  protecting you until it reports the hook as firing."));
 
   // The failure mode this exists to prevent: someone installs secretgate,
   // sees it succeed, and assumes they are covered — while the agent they
@@ -527,6 +574,18 @@ function cmdDoctor(): number {
     const record = records.find((r) => r.agent === agent.id);
     const beat = beats.find((b) => b.agent === agent.id);
 
+    // Capability is printed alongside the status, never inferred from it. A
+    // user on a block-only host must not read "firing" as "values are being
+    // redacted and restored", because on that host they are not.
+    const cap =
+      agent.capability === "redact"
+        ? c.dim("[redact]")
+        : agent.capability === "block"
+          ? c.yellow("[block only]")
+          : agent.capability === "partial"
+            ? c.yellow("[partial, block only]")
+            : c.dim("[no hooks]");
+
     let status: string;
     // A heartbeat outranks directory detection: if the hook has fired, the
     // agent plainly exists, whatever the filesystem looks like from here.
@@ -539,7 +598,8 @@ function cmdDoctor(): number {
     else if (agent.supported) status = c.yellow('detected, not wired — run "secretgate init"');
     else status = c.yellow("detected, no adapter yet");
 
-    out(`    ${agent.name.padEnd(14)} ${status}`);
+    out(`    ${agent.name.padEnd(16)} ${status} ${cap}`);
+    if (agent.note && agent.capability !== "redact") out(`      ${c.dim(agent.note)}`);
     if (beat) {
       for (const e of beat.events.slice(0, 4)) {
         out(`      ${c.dim(`${e.event.padEnd(18)} ${humanAge(e.at).padEnd(9)} ${e.count}x`)}`);
@@ -698,6 +758,11 @@ async function main(): Promise<number> {
     case "hook": {
       if (arg === "claude-code") return runClaudeCodeHook();
       if (arg === "cursor") return runCursorHook();
+      if (arg === "gemini") return runGeminiHook();
+      if (arg === "antigravity") return runAntigravityHook();
+      if (arg === "copilot") return runCopilotHook();
+      if (arg === "windsurf") return runWindsurfHook();
+      if (arg === "codex") return runCodexHook();
       if (arg === "pre-commit") return runPreCommit();
       process.stderr.write(`secretgate: unknown hook "${arg ?? ""}"\n`);
       return 2;

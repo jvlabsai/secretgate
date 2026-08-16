@@ -27,31 +27,37 @@ password — it just could not read either one.
 
 ## First — which agent are you using?
 
-This decides how you use secretgate, so answer it before installing anything.
+| Your agent | Capability | What you get |
+|---|---|---|
+| **Claude Code** | redact | Denies reads of `.env`, redacts prompts, restores values afterwards |
+| **Gemini CLI** | redact | As above, and rewrites tool arguments in place |
+| **Antigravity** | redact | Denies reads and commands, restores values afterwards |
+| **Cursor** | redact | As Claude Code. Beta — verify with `doctor` |
+| **GitHub Copilot** | redact | Denies and rewrites, but has no post-tool event, so placeholders are not auto-restored |
+| **Windsurf** | **block only** | Denies reads and commands. **Nothing is redacted or restored** |
+| **Codex** | **partial, block only** | Bash commands only. File reads are not covered, and hooks need a feature flag |
+| **Aider** | **no hooks** | Aider has no hook system. Use `secretgate lock` |
+| Anything else | — | Use `secretgate lock` |
 
-| Your agent | What protects you |
-|---|---|
-| **Claude Code** | Hooks — `secretgate init` |
-| **Cursor** | Hooks, beta and unverified — `secretgate init` |
-| **Gemini / Antigravity, Copilot, Codex, Windsurf, Aider, everything else** | **`secretgate lock`** — hooks cannot work |
+**Capability is not a detail.** On a block-only host there is no mechanism to
+swap a secret for a placeholder, so a finding becomes a refusal instead. If you
+are on Windsurf or Codex, do not paste a `.env` into a prompt expecting it to be
+handled — it will not be. `secretgate doctor` prints the capability next to each
+agent so this is never a guess.
 
-A hook is code your agent calls before it reads a file. **Only Claude Code and
-Cursor expose one.** For every other agent there is nothing for secretgate to
-attach to, so it cannot intercept a read — and running `init` will not protect
-you, however successful it looks.
+Wiring a hook is also not the same as it working. `init` never claims you are
+protected; only `doctor` can tell you that, and only after the hook has fired at
+least once.
 
-That is a limit of how those tools work, not something being worked around
-quietly. For any unsupported agent, use `lock`, which needs no cooperation from
-the agent at all:
+### For any unsupported agent
+
+`lock` needs no cooperation from the agent at all:
 
 ```bash
 secretgate lock .     # .env values become placeholders; real ones move out of the project
 # ... let the agent do its work ...
 secretgate unlock .   # values come back, byte for byte
 ```
-
-**`secretgate doctor` tells you which situation you are in.** If it says
-`NOT PROTECTED`, hooks are not firing and `lock` is your answer.
 
 New here? [**docs/GETTING-STARTED.md**](docs/GETTING-STARTED.md) is a worked
 example you can paste into a terminal.
@@ -142,10 +148,9 @@ secretgate fix .           # move them into .env (dry run; add --write to apply)
 
 ### If your agent is not supported
 
-Hooks only exist for **Claude Code** and **Cursor** today. For anything else
-there is nothing to intercept the read, so use the pipe form
-(`secretgate filter`) or rely on the git pre-commit hook. See
-[what is not built yet](#what-is-not-built-yet).
+See the [capability table](#first--which-agent-are-you-using) above. Aider and
+anything not listed have no hook to attach to, so use `secretgate lock` — it
+needs no cooperation from the agent.
 
 ---
 
@@ -157,7 +162,7 @@ there is nothing to intercept the read, so use the pipe form
 | Works offline | yes, enforced in CI | no | no | yes |
 | Telemetry | none | yes | yes | none |
 | Redact and restore | **yes** | block only | block only | block only |
-| Agents covered | Claude Code, + any tool via stdin filter | several | several | 2 |
+| Agents covered | 7 with hooks, plus `lock` for any agent at all | several | several | 2 |
 | Live-credential verification | no | **yes** | **yes** | no |
 | Org policy / dashboards / incident workflow | no | **yes** | **yes** | no |
 | Rule count | 55 hand-written (+ gitleaks import) | thousands | thousands | ~20 |
@@ -405,12 +410,14 @@ than glossing it. If you would rather no secret ever touched disk, use
 
 Being straight about it rather than letting you find out:
 
-- **Codex, Copilot, Windsurf, Aider** — detected by `init`, which tells you
-  plainly that there is no adapter yet. Use `secretgate filter` meanwhile.
-- **The Cursor adapter is written but unverified against a live Cursor.** Its
-  hook surface has moved more than once, so the adapter reads defensively and
-  fails open. `doctor` will tell you whether it is actually firing — that is
-  precisely the case the heartbeat was built for.
+- **Adapters beyond Claude Code are written but unverified against a live
+  host.** Cursor, Gemini, Antigravity, Copilot, Windsurf and Codex were built to
+  each host's documented hook contract, which is young and moves. They all read
+  defensively and fail open. `doctor` tells you whether one is actually firing —
+  precisely the case the heartbeat exists for. Reports of a hook that does not
+  fire are the most useful issue you can open.
+- **Aider has no hook system**, so there is nothing to attach to. It is
+  lock-only and always will be until Aider adds one.
 - **Encryption at rest for the vault** — the store is `0600` and short-lived but
   not encrypted, because a key stored beside the ciphertext is theatre. Doing it
   properly means an OS-keychain dependency, which conflicts with the zero-runtime-
