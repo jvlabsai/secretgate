@@ -30,10 +30,16 @@ for (const r of allRules) {
   if (!r.regex.global) throw new Error(`rule ${r.id} regex must have the g flag`);
 }
 
-export function rulesFor(disabled: string[]): Rule[] {
-  if (disabled.length === 0) return allRules;
+/**
+ * Custom rules run first so a user's own definition wins the dedupe against a
+ * built-in that happens to overlap — they know their credential formats better
+ * than we do, and the placeholder should name their provider, not ours.
+ */
+export function rulesFor(disabled: string[], custom: Rule[] = []): Rule[] {
+  const combined = custom.length > 0 ? [...custom, ...allRules] : allRules;
+  if (disabled.length === 0) return combined;
   const drop = new Set(disabled);
-  return allRules.filter((r) => !drop.has(r.id) && !drop.has(r.provider));
+  return combined.filter((r) => !drop.has(r.id) && !drop.has(r.provider));
 }
 
 export { cloudRules, vcsRules, aiRules, saasRules, keyRules, dbRules, genericRules };

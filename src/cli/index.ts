@@ -8,10 +8,14 @@ import { scan, blocking } from "../core/scan.js";
 import { fingerprint } from "../core/suppress.js";
 import { allRules } from "../core/rules/index.js";
 import { runClaudeCodeHook } from "../hooks/claude-code.js";
+import { runCursorHook } from "../hooks/cursor.js";
 import { runFilter } from "../hooks/generic.js";
 import { runPreCommit } from "../hooks/git.js";
-import { detectAgents, installClaudeCode, installGitHook, uninstallAll, installedRecords, STATE_DIR } from "./install.js";
+import { runMcpProxy } from "../hooks/mcp-proxy.js";
+import { planFix, applyEnvFiles, writeSource } from "./fix.js";
+import { detectAgents, installClaudeCode, installCursor, installGitHook, uninstallAll, installedRecords, STATE_DIR } from "./install.js";
 import { clearStore, storeStatus, VAULT_PATH } from "../core/vault-store.js";
+import { readHeartbeat, agentHealth, humanAge, clearHeartbeat } from "../core/heartbeat.js";
 
 // No colour library. Five SGR codes are the whole requirement, and they go
 // quiet when stdout is not a terminal or NO_COLOR is set.
@@ -36,15 +40,18 @@ const USAGE = `${c.bold("secretgate")} — keep credentials out of your AI codin
 
   secretgate init              detect installed agents and wire every hook
   secretgate scan [path]       scan a file or directory
+  secretgate fix [path]        move hardcoded secrets into .env (--write to apply)
   secretgate filter            stdin -> stdout, redacted (--rehydrate to reverse)
   secretgate baseline          accept every current finding
-  secretgate doctor            check what is wired up and what is not
+  secretgate doctor            check what is wired up and whether it is firing
   secretgate uninstall         restore every config file we touched
   secretgate rules             list detection rules
   secretgate vault             show the local placeholder store (--clear to wipe)
 
-  secretgate hook claude-code  hook entry point (not for humans)
-  secretgate hook pre-commit   git hook entry point
+  secretgate mcp-proxy -- <cmd>  guard an MCP server's stdio in both directions
+  secretgate hook claude-code    hook entry point (not for humans)
+  secretgate hook cursor         hook entry point (not for humans)
+  secretgate hook pre-commit     git hook entry point
 
 Options
   --mode <redact|block|warn>   override the configured mode
@@ -144,6 +151,76 @@ function cmdScan(target: string, opts: { json?: boolean; mode?: string }): numbe
   return 1;
 }
 
+// --- fix -------------------------------------------------------------------
+
+function cmdFix(target: string, write: boolean): number {
+  const root = resolve(target);
+  if (!existsSync(root)) {
+    process.stderr.write(`secretgate: no such path: ${target}\n`);
+    return 2;
+  }
+
+  const config = loadConfig(statSync(root).isDirectory() ? root : process.cwd());
+  const files = statSync(root).isDirectory() ? [...walk(root)] : [root];
+
+  let touched = 0;
+  let total = 0;
+  const warnings = new Set<string>();
+
+  for (const file of files) {
+    let source: string;
+    try {
+      if (statSync(file).size > MAX_FILE_BYTES) continue;
+      source = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (source.indexOf(NUL) !== -1) continue;
+
+    const plan = planFix(file, source, config);
+    if (plan.edits.length === 0 && plan.manual.length === 0) continue;
+
+    const shown = relative(process.cwd(), file) || file;
+    out("");
+    out(`  ${c.bold(shown)} ${c.dim(`(${plan.language})`)}`);
+
+    for (const edit of plan.edits) {
+      out(`    ${c.dim(`line ${edit.line}`)}  ${c.red("- ")}hardcoded value`);
+      out(`               ${c.green("+ ")}${edit.replacement}   ${c.dim(`# ${edit.name} added to .env`)}`);
+    }
+    for (const m of plan.manual) {
+      out(`    ${c.dim(`line ${m.line}`)}  ${c.yellow("! ")}left alone — ${m.reason}`);
+    }
+
+    if (plan.edits.length === 0) continue;
+    touched++;
+    total += plan.edits.length;
+
+    const env = applyEnvFiles(file, plan.edits, write);
+    if (env.gitignoreWarning) warnings.add(env.gitignoreWarning);
+    if (write) writeSource(file, plan.updated);
+  }
+
+  out("");
+  if (touched === 0) {
+    out(`${c.green("nothing to fix")}  no hardcoded credentials in a supported file type`);
+    return 0;
+  }
+
+  if (write) {
+    out(`${c.green(`moved ${total} secret(s)`)} out of ${touched} file(s) and into .env`);
+    out(c.dim("  .env.example was updated with the key names and empty values"));
+    out(c.dim("  scan will still report these — they are in .env now, which is the point"));
+  } else {
+    out(`${c.yellow(`${total} secret(s)`)} in ${touched} file(s) can be moved into .env`);
+    out(c.dim("  this was a dry run — nothing changed. Re-run with --write to apply."));
+  }
+
+  for (const w of warnings) out(`  ${c.yellow("warning")}  ${w}`);
+  out("");
+  return 0;
+}
+
 // --- baseline -------------------------------------------------------------
 
 function cmdBaseline(target: string): number {
@@ -210,7 +287,7 @@ function cmdInit(): number {
       continue;
     }
 
-    const result = installClaudeCode();
+    const result = agent.id === "cursor" ? installCursor() : installClaudeCode();
     if (result.changed) wired++;
     const mark = result.changed ? c.green("+") : c.dim("=");
     out(`  ${mark} ${agent.name.padEnd(14)} ${result.changed ? c.green(result.note) : c.dim(result.note)}`);
@@ -267,15 +344,31 @@ function cmdDoctor(): number {
   out(`  ${"state dir".padEnd(18)} ${STATE_DIR}`);
   out("");
 
+  const beats = agentHealth(readHeartbeat());
+
   out(c.bold("  agents"));
   for (const agent of detectAgents()) {
     const record = records.find((r) => r.agent === agent.id);
+    const beat = beats.find((b) => b.agent === agent.id);
+
     let status: string;
-    if (!agent.present) status = c.dim("not installed");
-    else if (record) status = c.green("wired");
+    // A heartbeat outranks directory detection: if the hook has fired, the
+    // agent plainly exists, whatever the filesystem looks like from here.
+    if (beat?.lastSeen) status = c.green(`firing, last seen ${humanAge(beat.lastSeen)}`);
+    else if (!agent.present) status = c.dim("not installed");
+    else if (record)
+      // The distinction this whole heartbeat exists for. Configured is not the
+      // same as working, and only one of them protects you.
+      status = c.yellow("wired, but has never fired — start a session and check again");
     else if (agent.supported) status = c.yellow('detected, not wired — run "secretgate init"');
     else status = c.yellow("detected, no adapter yet");
+
     out(`    ${agent.name.padEnd(14)} ${status}`);
+    if (beat) {
+      for (const e of beat.events.slice(0, 4)) {
+        out(`      ${c.dim(`${e.event.padEnd(18)} ${humanAge(e.at).padEnd(9)} ${e.count}x`)}`);
+      }
+    }
   }
 
   const gitRoot = findGitRoot(process.cwd());
@@ -298,6 +391,7 @@ function cmdUninstall(): number {
   const { restored, removed, problems } = uninstallAll();
   // Removing the tool must not leave its cache of real credentials behind.
   const vaultCleared = clearStore();
+  clearHeartbeat();
   out("");
   if (vaultCleared) out(`  ${c.green("cleared")}  ${VAULT_PATH}`);
   for (const f of restored) out(`  ${c.green("restored")} ${f}`);
@@ -366,6 +460,7 @@ async function main(): Promise<number> {
       mode: { type: "string" },
       rehydrate: { type: "boolean" },
       clear: { type: "boolean" },
+      write: { type: "boolean" },
     },
   });
 
@@ -387,6 +482,14 @@ async function main(): Promise<number> {
       return cmdInit();
     case "scan":
       return cmdScan(arg ?? ".", { json: !!values.json, mode: values.mode as string | undefined });
+    case "fix":
+      return cmdFix(arg ?? ".", !!values.write);
+    case "mcp-proxy": {
+      // Everything after `--` is the server command, untouched.
+      const sep = process.argv.indexOf("--");
+      const upstream = sep === -1 ? (positionals as string[]).slice(1) : process.argv.slice(sep + 1);
+      return runMcpProxy(upstream);
+    }
     case "filter":
       return runFilter({ rehydrate: !!values.rehydrate, quiet: !!values.quiet });
     case "baseline":
@@ -401,6 +504,7 @@ async function main(): Promise<number> {
       return cmdVault(!!values.clear);
     case "hook": {
       if (arg === "claude-code") return runClaudeCodeHook();
+      if (arg === "cursor") return runCursorHook();
       if (arg === "pre-commit") return runPreCommit();
       process.stderr.write(`secretgate: unknown hook "${arg ?? ""}"\n`);
       return 2;

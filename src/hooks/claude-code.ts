@@ -13,6 +13,7 @@
  * a guardrail people remove.
  */
 import { loadConfig } from "../config/index.js";
+import { recordBeat } from "../core/heartbeat.js";
 import { guardOutbound, guardInbound, extractToolText, isSensitivePath, isSensitiveCommand, readStdin } from "./shared.js";
 
 interface HookPayload {
@@ -57,6 +58,11 @@ export async function runClaudeCodeHook(): Promise<number> {
 
   const config = loadConfig(payload.cwd ?? process.cwd());
   const event = payload.hook_event_name ?? "";
+
+  // Stamped before any decision, so `doctor` can distinguish "configured" from
+  // "actually being called" — the difference that matters when an agent renames
+  // an event and the hook silently stops firing.
+  recordBeat("claude-code", event || "unknown");
 
   if (event === "UserPromptSubmit") {
     const prompt = payload.prompt ?? "";

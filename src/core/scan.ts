@@ -124,7 +124,7 @@ export function scan(text: string, config: Config): ScanResult {
   if (!text) return { findings: [], suppressed: [] };
 
   const raw: Finding[] = [];
-  for (const rule of rulesFor(config.rules.disable)) {
+  for (const rule of rulesFor(config.rules.disable, config.rules.custom)) {
     runRule(text, rule, raw);
   }
 

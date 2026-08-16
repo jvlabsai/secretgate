@@ -116,11 +116,103 @@ covering exactly the documented schema rather than a general-purpose library.
 ```
 secretgate init              detect installed agents and wire every hook
 secretgate scan [path]       scan a file or directory
+secretgate fix [path]        move hardcoded secrets into .env (--write to apply)
 secretgate filter            stdin -> stdout, redacted (--rehydrate to reverse)
 secretgate baseline          accept every current finding
-secretgate doctor            check what is wired up and what is not
+secretgate doctor            check what is wired up and whether it is firing
 secretgate uninstall         restore every config file we touched
 secretgate rules             list detection rules
+secretgate vault             inspect the placeholder store (--clear to wipe)
+secretgate mcp-proxy -- <cmd>  guard an MCP server's stdio in both directions
+```
+
+### `fix` — because finding it is only half the job
+
+Every other tool in this space stops at "there is a secret on line 12" and
+leaves you to do the actual work. That is the moment people reach for a pragma
+instead, and a suppressed finding is a secret that is still in the repo.
+
+```bash
+secretgate fix .            # dry run, shows the diff
+secretgate fix . --write    # apply it
+```
+
+```diff
+- databaseUrl: "postgres://svc:h4Kd9wQz2Lp8Nx7@db.internal:5432/orders",
++ databaseUrl: process.env.DATABASE_URL,
+```
+
+The value goes into `.env` at the project root, the key goes into
+`.env.example` with an empty value, and you get a warning if `.env` is not
+gitignored — moving a secret into a committed file is not an improvement.
+
+Note it moves the *whole* string literal. Replacing only the matched password
+would produce `"postgres://svc:process.env.X@host/db"`, which still compiles and
+silently never resolves. Template literals with `${interpolation}` and values
+that are not inside a string are reported and left alone rather than guessed at.
+
+JS/TS, Python, Ruby, Go, PHP and shell.
+
+### `doctor` — configured is not the same as working
+
+```
+agents
+  Claude Code    wired, last fired 4m ago
+    UserPromptSubmit   4m ago    31x
+    PreToolUse         4m ago    112x
+  Cursor         wired, but has never fired — start a session and check again
+```
+
+Hook APIs move. An event gets renamed, your hook stops being called, and you
+keep pasting `.env` files into prompts believing you are covered. Every hook
+invocation stamps a local file with the event name and timestamp — no content —
+so `doctor` can tell you the difference between "the config looks right" and
+"this is actually running".
+
+## Custom rules
+
+Every company has credential formats nobody outside it has heard of. Without
+these, secretgate is a tool an individual can use and a team cannot.
+
+```yaml
+rules:
+  custom:
+    - id: acme-service-token
+      provider: acme
+      description: ACME internal service token
+      regex: "ACME-SVC-[A-Z0-9]{32}"
+      prefilter:
+        - "ACME-SVC-"
+      confidence: high
+```
+
+Rules that fail to compile are reported rather than silently dropped, and one
+that backtracks catastrophically is rejected outright — left in, it would hang
+the scanner on every prompt and you would blame the agent.
+
+## MCP servers
+
+An MCP server sits at the end of a pipe the agent hooks never see. Tool
+arguments go straight from the model to the server and results come straight
+back, so a filesystem server reading `.env` leaks past everything else here.
+
+```bash
+secretgate mcp-proxy -- npx -y @modelcontextprotocol/server-filesystem /srv
+```
+
+Relays stdio JSON-RPC in both directions, redacting arguments on the way out and
+results on the way back. stdio rather than HTTP deliberately: a network client
+would have to live in the one part of this codebase that promises never to make
+a network call.
+
+## pre-commit
+
+```yaml
+repos:
+  - repo: https://github.com/jvlabsai/secretgate
+    rev: v0.1.0
+    hooks:
+      - id: secretgate
 ```
 
 The filter is the universal escape hatch — it makes secretgate work with tools
@@ -196,11 +288,12 @@ than glossing it. If you would rather no secret ever touched disk, use
 
 Being straight about it rather than letting you find out:
 
-- **Cursor, Codex, Copilot, Windsurf, Aider** — detected by `init`, which tells
-  you plainly that there is no adapter yet. Use `secretgate filter`. Their hook
-  APIs move quickly and shipping an adapter I cannot test against the current
-  version would be worse than shipping none.
-- **MCP proxy mode** — designed, not written. A real leak path, and next up.
+- **Codex, Copilot, Windsurf, Aider** — detected by `init`, which tells you
+  plainly that there is no adapter yet. Use `secretgate filter` meanwhile.
+- **The Cursor adapter is written but unverified against a live Cursor.** Its
+  hook surface has moved more than once, so the adapter reads defensively and
+  fails open. `doctor` will tell you whether it is actually firing — that is
+  precisely the case the heartbeat was built for.
 - **Encryption at rest for the vault** — the store is `0600` and short-lived but
   not encrypted, because a key stored beside the ciphertext is theatre. Doing it
   properly means an OS-keychain dependency, which conflicts with the zero-runtime-

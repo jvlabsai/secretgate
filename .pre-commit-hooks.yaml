@@ -1,0 +1,10 @@
+- id: secretgate
+  name: secretgate
+  description: Block commits that contain credentials
+  entry: secretgate hook pre-commit
+  language: node
+  # The hook reads the staged index itself rather than a file list, so that a
+  # partially staged file is judged on what is actually being committed.
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]

@@ -102,8 +102,8 @@ test("a baseline fingerprint suppresses a known finding", () => {
 test("disabling a rule works by id and by provider", () => {
   const text = FAKE.githubToken;
   assert.ok(found(text).includes("github-pat-classic"));
-  assert.deepEqual(scan(text, { ...config, rules: { disable: ["github-pat-classic"] } }).findings, []);
-  assert.deepEqual(scan(text, { ...config, rules: { disable: ["github"] } }).findings, []);
+  assert.deepEqual(scan(text, { ...config, rules: { disable: ["github-pat-classic"], custom: [] } }).findings, []);
+  assert.deepEqual(scan(text, { ...config, rules: { disable: ["github"], custom: [] } }).findings, []);
 });
 
 test("overlapping matches collapse to the most specific one", () => {

@@ -56,7 +56,11 @@ export interface VaultConfig {
 export interface Config {
   mode: "redact" | "block" | "warn";
   entropy: EntropyConfig;
-  rules: { disable: string[] };
+  rules: {
+    disable: string[];
+    /** Compiled from `rules.custom` in secretgate.yml. */
+    custom: Rule[];
+  };
   allowlist: { paths: string[]; patterns: string[] };
   vault: VaultConfig;
   /** Absolute path of the file being scanned, when scanning a file. */

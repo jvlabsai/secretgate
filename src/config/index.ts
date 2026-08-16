@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseSimpleYaml } from "./yaml.js";
+import { buildCustomRules } from "../core/rules/custom.js";
 import type { Config } from "../core/types.js";
 
 export const CONFIG_FILENAMES = ["secretgate.yml", "secretgate.yaml", ".secretgate.yml"];
@@ -10,7 +11,7 @@ export function defaultConfig(): Config {
   return {
     mode: "redact",
     entropy: { enabled: true, threshold: 4.0, action: "warn" },
-    rules: { disable: [] },
+    rules: { disable: [], custom: [] },
     allowlist: { paths: [], patterns: [] },
     // On by default because redact mode does not function without it: hooks run
     // one process per event, so a purely in-memory vault has already exited by
@@ -71,6 +72,15 @@ export function loadConfig(cwd: string = process.cwd()): Config {
         }
       }
       if (Array.isArray(raw.rules?.disable)) config.rules.disable = raw.rules.disable.map(String);
+      if (raw.rules?.custom !== undefined) {
+        const { rules, problems } = buildCustomRules(raw.rules.custom);
+        config.rules.custom = rules;
+        // Loudly, on stderr. A custom rule silently not loading means a
+        // credential format the user believes is covered is not.
+        for (const problem of problems) {
+          process.stderr.write(`secretgate: ${problem}\n`);
+        }
+      }
       if (Array.isArray(raw.allowlist?.paths)) config.allowlist.paths = raw.allowlist.paths.map(String);
       if (Array.isArray(raw.allowlist?.patterns)) config.allowlist.patterns = raw.allowlist.patterns.map(String);
       if (typeof raw.vault?.persist === "boolean") config.vault.persist = raw.vault.persist;

@@ -23,10 +23,13 @@
  * If the config ever needs them, take the dependency then.
  */
 
-export type YamlValue = string | number | boolean | string[] | YamlMap;
+export type YamlValue = string | number | boolean | string[] | YamlMap | YamlMap[];
 export interface YamlMap {
   [key: string]: YamlValue;
 }
+
+/** `- key: value` starts a map entry; a plain identifier before the colon. */
+const LIST_MAP_ENTRY = /^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/;
 
 function stripComment(line: string): string {
   // A `#` inside quotes is content, not a comment.
@@ -74,6 +77,62 @@ export function parseSimpleYaml(source: string): YamlMap {
 
   let cursor = 0;
 
+  /**
+   * A list is either scalars or maps, never both in practice. `rules.custom` is
+   * the reason maps are supported at all: a user-defined detection rule needs
+   * an id, a regex and a handful of options, and expressing that as a flat
+   * string would be worse than parsing one more shape.
+   */
+  function parseList(listIndent: number): string[] | YamlMap[] {
+    const scalars: string[] = [];
+    const maps: YamlMap[] = [];
+
+    while (cursor < lines.length) {
+      const item = lines[cursor]!;
+      if (item.indent !== listIndent || !item.content.startsWith("- ")) break;
+      const body = item.content.slice(2).trim();
+      cursor++;
+
+      // A quoted value is a scalar even if it contains a colon, which keeps
+      // things like "postgres://host" out of the map branch.
+      const asEntry = body.startsWith('"') || body.startsWith("'") ? null : body.match(LIST_MAP_ENTRY);
+      if (!asEntry) {
+        scalars.push(String(coerce(body)));
+        continue;
+      }
+
+      const entry: YamlMap = {};
+      entry[asEntry[1]!] = coerce(asEntry[2] ?? "");
+
+      // Continuation lines: further keys of this same list item.
+      while (cursor < lines.length) {
+        const cont = lines[cursor]!;
+        if (cont.indent <= listIndent || cont.content.startsWith("- ")) break;
+
+        const colon = cont.content.indexOf(":");
+        if (colon === -1) {
+          cursor++;
+          continue;
+        }
+        const k = cont.content.slice(0, colon).trim();
+        const v = cont.content.slice(colon + 1).trim();
+        cursor++;
+
+        if (v) {
+          entry[k] = coerce(v);
+          continue;
+        }
+        // Bare key: a nested list belonging to this entry, e.g. prefilter.
+        const nested = lines[cursor];
+        entry[k] = nested && nested.indent > cont.indent && nested.content.startsWith("- ") ? parseList(nested.indent) : "";
+      }
+
+      maps.push(entry);
+    }
+
+    return maps.length > 0 ? maps : scalars;
+  }
+
   function parseBlock(minIndent: number): YamlMap {
     const map: YamlMap = {};
 
@@ -105,14 +164,7 @@ export function parseSimpleYaml(source: string): YamlMap {
       }
 
       if (next.content.startsWith("- ")) {
-        const items: string[] = [];
-        while (cursor < lines.length) {
-          const item = lines[cursor]!;
-          if (item.indent <= line.indent || !item.content.startsWith("- ")) break;
-          items.push(String(coerce(item.content.slice(2))));
-          cursor++;
-        }
-        map[key] = items;
+        map[key] = parseList(next.indent);
         continue;
       }
 

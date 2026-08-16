@@ -83,8 +83,7 @@ export function detectAgents(): DetectedAgent[] {
       name: "Cursor",
       file: join(cursorDir, "hooks.json"),
       present: existsSync(cursorDir),
-      supported: false,
-      note: "Cursor's hook surface is still moving. Use `secretgate filter` in the meantime.",
+      supported: true,
     },
     {
       id: "codex",
@@ -172,6 +171,58 @@ export function installClaudeCode(): { changed: boolean; file: string; note: str
 
   const manifest = readManifest();
   const record: InstallRecord = { agent: "claude-code", file };
+
+  mkdirSync(dirname(file), { recursive: true });
+  if (existed) record.backup = backup(file, stamp);
+  else record.created = true;
+
+  writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+
+  manifest.records = manifest.records.filter((r) => r.file !== file);
+  manifest.records.push(record);
+  manifest.installedAt = new Date().toISOString();
+  writeManifest(manifest);
+
+  return { changed: true, file, note: existed ? `wired (backup: ${record.backup})` : "wired (file created)" };
+}
+
+// --- cursor ---------------------------------------------------------------
+
+const CURSOR_EVENTS = ["beforeSubmitPrompt", "beforeShellExecution", "beforeReadFile", "afterFileEdit"];
+const CURSOR_COMMAND = "secretgate hook cursor";
+
+export function installCursor(): { changed: boolean; file: string; note: string } {
+  const win = platform() === "win32";
+  const dir = win ? join(homedir(), "AppData", "Roaming", "Cursor") : join(homedir(), ".cursor");
+  const file = join(dir, "hooks.json");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const existed = existsSync(file);
+
+  let settings: Record<string, any> = {};
+  if (existed) {
+    const raw = readFileSync(file, "utf8");
+    try {
+      settings = raw.trim() ? JSON.parse(raw) : {};
+    } catch {
+      return { changed: false, file, note: `could not parse ${file}; left untouched. Fix the JSON and re-run.` };
+    }
+  }
+
+  settings.version ??= 1;
+  settings.hooks ??= {};
+
+  const before = JSON.stringify(settings);
+  for (const event of CURSOR_EVENTS) {
+    const existing: { command?: string }[] = settings.hooks[event] ?? [];
+    if (existing.some((h) => h.command?.includes("secretgate"))) continue;
+    settings.hooks[event] = [...existing, { command: CURSOR_COMMAND }];
+  }
+  const after = JSON.stringify(settings);
+
+  if (before === after) return { changed: false, file, note: "already wired" };
+
+  const manifest = readManifest();
+  const record: InstallRecord = { agent: "cursor", file };
 
   mkdirSync(dirname(file), { recursive: true });
   if (existed) record.backup = backup(file, stamp);
