@@ -1,69 +1,76 @@
-# Renders docs/demo.gif — the 20-second pitch.
+# Renders docs/demo.gif — the pitch, in about 25 seconds.
 #
-#   go install github.com/charmbracelet/vhs@latest
+#   npm install -g secretgate
 #   vhs demo/demo.tape
 #
-# Scripted rather than hand-recorded so it can be regenerated when the output
-# changes, and so a reviewer can see exactly what is being demonstrated instead
-# of taking a GIF on trust.
+# Scripted rather than hand-recorded so it regenerates when behaviour changes,
+# and so a reviewer can read exactly what is being demonstrated instead of
+# taking a GIF on trust.
+#
+# Render it on Linux or macOS. VHS drives a real terminal through ttyd, and
+# ttyd cannot spawn bash on Windows — the tape parses and then hangs forever.
+# `.github/workflows/demo.yml` renders it on an Ubuntu runner for that reason.
+#
+# VHS has no escaping for nested quotes inside Type, so anything needing them
+# lives in demo/setup.sh.
 
-Output docs/demo.gif
+# Quoted: VHS's parser splits an unquoted path on the dot.
+Output "docs/demo.gif"
 
 Set Shell bash
-Set FontSize 17
-Set Width 1300
-Set Height 760
-Set Padding 22
+Set FontSize 16
+Set Width 1200
+Set Height 700
+Set Padding 20
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 45ms
-Set PlaybackSpeed 1.0
+Set TypingSpeed 40ms
 
 Hide
-Type "cd $(mktemp -d) && clear" Enter
-# The demo secret is assembled at runtime, for the same reason the test
-# fixtures are: no file in this repo should hold a live-looking key.
-Type "AWSK=$(printf '%s' AKIA 4KTNQ7VZL2WXMP3D)" Enter
-Type "GHT=$(printf '%s' ghp _ 9fK2mQ7xLp4RtY8vN3wZ6bH1jC5sD0aG4eU2)" Enter
-Type "printf 'AWS_ACCESS_KEY_ID=%s\nDATABASE_URL=postgres://svc:h4Kd9wQz2Lp8Nx7@db.internal:5432/orders\nGITHUB_TOKEN=%s\n' \"$AWSK\" \"$GHT\" > .env" Enter
-Type "clear" Enter
+Type "bash demo/setup.sh && cd /tmp/secretgate-demo && clear"
+Enter
+Sleep 2s
 Show
 
-Type "# You are about to paste a .env into an AI agent."
+Type "# A .env you are about to paste into an AI agent."
 Enter
-Sleep 1200
+Sleep 1s
 
 Type "cat .env"
 Enter
-Sleep 2600
+Sleep 3s
 
-Type "clear" Enter
-Sleep 300
-
-Type "# This is what the agent would actually receive."
+Type "clear"
 Enter
-Sleep 1000
+Sleep 500ms
+
+Type "# What the agent actually receives:"
+Enter
+Sleep 800ms
 
 Type "secretgate filter < .env"
 Enter
-Sleep 3800
+Sleep 4s
 
-Type "clear" Enter
-Sleep 300
+Type "# Same structure. Same providers. No secrets."
+Enter
+Sleep 2s
 
-Type "# Structure intact. Provider intact. Secrets gone."
+Type "clear"
 Enter
-Sleep 1000
-Type "# The agent edits the file and hands it back:"
+Sleep 500ms
+
+Type "# The agent edits the file and hands it back."
 Enter
-Sleep 1200
+Sleep 1s
 
 Type "secretgate filter < .env > redacted.env"
 Enter
-Sleep 800
+Sleep 800ms
+
 Type "sed 's|db.internal|db.prod.internal|' redacted.env | secretgate filter --rehydrate"
 Enter
-Sleep 4200
+Sleep 4s
 
-Type "# Real values restored locally. The model never saw one."
+Type "# Edit kept. Real values restored. The model never saw one."
 Enter
-Sleep 2600
+Sleep 3s

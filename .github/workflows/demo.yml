@@ -1,0 +1,60 @@
+name: demo
+
+# Renders docs/demo.gif from demo/demo.tape and commits it.
+#
+# On a runner rather than a laptop because VHS drives a real terminal through
+# ttyd, and ttyd cannot spawn bash on Windows. Rendering in CI also means the
+# GIF is reproducible from the tape by anyone, rather than being whatever one
+# person's terminal looked like on the day.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "demo/demo.tape"
+      - "demo/setup.sh"
+      - ".github/workflows/demo.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      # Build and link from source, so the GIF shows this commit's behaviour
+      # rather than whatever version happens to be on npm.
+      - run: npm ci
+      - run: npm run build
+      - run: npm link
+
+      - name: confirm the binary works before recording
+        run: secretgate --version && secretgate doctor
+
+      - uses: charmbracelet/vhs-action@v2
+        with:
+          path: demo/demo.tape
+
+      - name: commit the gif if it changed
+        run: |
+          if [ ! -f docs/demo.gif ]; then
+            echo "vhs produced no gif"
+            exit 1
+          fi
+          git config user.name "JV Labs"
+          git config user.email "connect@jvlabs.io"
+          git add docs/demo.gif
+          if git diff --cached --quiet; then
+            echo "gif unchanged"
+            exit 0
+          fi
+          git commit -m "Re-render docs/demo.gif from demo/demo.tape"
+          git push
