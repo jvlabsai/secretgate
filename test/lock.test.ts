@@ -160,11 +160,42 @@ test("a backup is written before the file is modified", () => {
   }
 });
 
-test("isLocked recognises a locked file and only a locked file", () => {
-  assert.ok(isLocked("API_KEY=SECRETGATE_AWS_KEY_A3F4\n"));
-  assert.ok(isLocked('TOKEN="SECRETGATE_GENERIC_KEY_9260"\n'.replace(/"/g, "")));
+test("isLocked recognises every quoting style locking can produce", () => {
+  // Locking preserves the line's existing quotes. Missing the quoted form
+  // meant a file whose secrets were all quoted locked fine and then reported
+  // itself as not locked, so unlock no-opped and left the developer stuck.
+  assert.ok(isLocked("API_KEY=SECRETGATE_AWS_KEY_A3F4\n"), "bare");
+  assert.ok(isLocked('TOKEN="SECRETGATE_GENERIC_KEY_9260"\n'), "double quoted");
+  assert.ok(isLocked("TOKEN='SECRETGATE_GENERIC_KEY_9260'\n"), "single quoted");
+  assert.ok(isLocked('export TOKEN="SECRETGATE_GENERIC_KEY_9260"\n'), "exported");
+
   assert.ok(!isLocked("API_KEY=realvalue123456\n"));
   assert.ok(!isLocked("NODE_ENV=development\n"));
+});
+
+/**
+ * The published-package failure this guards. A single quoted secret was the
+ * whole file, so nothing else could satisfy the match, and unlock silently did
+ * nothing. The original test mixed quoted and unquoted values, which hid it.
+ */
+test("a file whose only secret is quoted still round-trips", () => {
+  const dir = mkdtempSync(join(tmpdir(), "secretgate-quoted-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, ".gitignore"), ".env*\n");
+
+    const only = `NODE_ENV=dev\nLINKEDIN_ACCESS_TOKEN="${FAKE_LINKEDIN}"\n`;
+    writeFileSync(join(dir, ".env.local"), only);
+
+    run(dir, ["lock", dir]);
+    const locked = readFileSync(join(dir, ".env.local"), "utf8");
+    assert.ok(!locked.includes(FAKE_LINKEDIN), "must actually lock");
+
+    run(dir, ["unlock", dir]);
+    assert.equal(readFileSync(join(dir, ".env.local"), "utf8"), only, "and must actually unlock");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test(".env.example is never locked", () => {

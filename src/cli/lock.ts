@@ -44,8 +44,18 @@ export interface LockResult {
   skipped?: string;
 }
 
+/**
+ * The optional quotes are the whole point of this regex.
+ *
+ * Locking preserves whatever quoting the line already had, so a quoted value
+ * becomes KEY="SECRETGATE_...". Without allowing for that, a file whose secrets
+ * were all quoted locked correctly and then reported itself as not locked, so
+ * `unlock` no-opped and left the developer with placeholders and no obvious way
+ * back. A test file with one quoted and one unquoted secret hid this: the
+ * unquoted line alone was enough to satisfy the match.
+ */
 export function isLocked(contents: string): boolean {
-  return /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*SECRETGATE_[A-Z0-9_]+\s*$/m.test(contents);
+  return /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*["']?SECRETGATE_[A-Z0-9_]+["']?\s*$/m.test(contents);
 }
 
 export function lockEnvFile(envPath: string, config: Config): LockResult {
